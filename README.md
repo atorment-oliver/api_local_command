@@ -56,7 +56,7 @@ Requiere .NET 8 SDK, Visual Studio Build Tools con C++ y Windows SDK:
 
 ```powershell
 msbuild native\ComandosMDB\ComandosMDB.vcxproj /p:Configuration=Release /p:Platform=x64
- dotnet restore ApiLocalCommand.csproj
+dotnet restore ApiLocalCommand.csproj
  dotnet build ApiLocalCommand.csproj -c Release
 ```
 
