@@ -107,6 +107,16 @@ public:
         SendHexCommand(command.data(), command.size());
     }
 
+    void SendRepeatedCommand(const std::string& portName, const std::vector<uint8_t>& command, int repeatCount, int intervalMilliseconds) {
+        Open(portName);
+        for (int i = 0; i < repeatCount; ++i) {
+            SendHexCommand(command.data(), command.size());
+            if (i + 1 < repeatCount) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(intervalMilliseconds));
+            }
+        }
+    }
+
     void SendCommands(const std::string& portName, const std::vector<std::vector<uint8_t>>& commands) {
         Open(portName);
         printf("COMANDO - ");
@@ -231,8 +241,9 @@ public:
 };
 
 // Exportar la función que será llamada desde otras aplicaciones (como C#)
-extern "C" __declspec(dllexport) int SendCommandMDB(const char* portName, const uint8_t* commands, size_t length) {
-    if (portName == nullptr || commands == nullptr || length == 0 || length > 256) {
+extern "C" __declspec(dllexport) int SendCreditRepeatsMDB(const char* portName, const uint8_t* commands, size_t length, int repeatCount, int intervalMilliseconds) {
+    if (portName == nullptr || commands == nullptr || length == 0 || length > 256 ||
+        repeatCount < 1 || repeatCount > 500 || intervalMilliseconds < 30 || intervalMilliseconds > 5000) {
         return 1; // Invalid arguments
     }
     try {
@@ -240,7 +251,7 @@ extern "C" __declspec(dllexport) int SendCommandMDB(const char* portName, const 
         std::vector<uint8_t> commandVector(commands, commands + length);
         port.DisablePort(portName);
         port.EnablePort(portName);
-        port.SendCommand(portName, commandVector);
+        port.SendRepeatedCommand(portName, commandVector, repeatCount, intervalMilliseconds);
         return 0;
     }
     catch (const std::exception& e) {
