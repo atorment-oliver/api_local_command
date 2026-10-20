@@ -5,3 +5,14 @@ credit-requests/
 appsettings.Local.json
 *.user
 *.suo
+
+.vs/
+**/Debug/
+**/Release/
+**/x64/
+**/Win32/
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.tlog/
