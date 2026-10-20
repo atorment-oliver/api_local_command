@@ -7,12 +7,12 @@ using Microsoft.AspNetCore.Mvc;
 var builder = WebApplication.CreateBuilder(args);
 var settings = ApiSettings.Load(builder.Configuration, builder.Environment.IsDevelopment());
 
-builder.WebHost.UseUrls(settings.ListenUrl);
 builder.Services.AddSingleton(settings);
 builder.Services.AddSingleton<CreditSender>();
 
 var app = builder.Build();
 
+app.MapGet("/", () => Results.Ok(new { status = "running", health = "/health", endpoint = "/api/credits" }));
 app.MapGet("/health", () => Results.Ok(new { status = "running" }));
 app.MapPost("/api/credits", async (
     HttpContext http,
