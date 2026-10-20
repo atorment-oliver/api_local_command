@@ -22,11 +22,12 @@ El estado `Logged` confirma que se escribió la trama o las tramas en el puerto 
 
 ## Request
 
-URL local predeterminada:
+URL de prueba en Visual Studio:
 
-```
-POST http://127.0.0.1:5098/api/credits
-```
+- Perfil **IIS Express**: `https://localhost:44390/health`
+- Perfil **ApiLocalCommand**: `http://127.0.0.1:5098/health`
+
+Ambas rutas `/` y `/health` muestran el estado del servicio. Para enviar créditos, usa `POST` al mismo host y puerto con la ruta `/api/credits` (por ejemplo, `https://localhost:44390/api/credits` si ejecutas IIS Express).
 
 JSON:
 
@@ -45,7 +46,7 @@ Se acepta también el campo `application` en lugar de `bank` para compatibilidad
 En `appsettings.json`:
 
 - `LocalApi:Username` y `LocalApi:Password`: credenciales Basic Auth. En Visual Studio, el perfil `ApiLocalCommand` ejecuta en `Development` y usa `vending-reader` / `dev-only-vending-password` si el password sigue como marcador de ejemplo. Estas credenciales son solo para depuración local.
-- `LocalApi:ListenUrl`: dirección y puerto local de escucha.
+- El perfil de inicio de Visual Studio define dirección y puerto para depuración: revisa `Properties/launchSettings.json`. El perfil IIS Express usa HTTPS en el puerto `44390`; el perfil `ApiLocalCommand` usa HTTP en `5098`.
 - `LocalApi:CreditLogPath`: archivo de registro; predeterminado `C:\\Vending\\credits.log`.
 - `LocalApi:MaxCreditAmount`: monto máximo por request.
 - `Mdb:DllPath`: DLL nativa, predeterminada junto a la API publicada como `ComandosMDB.dll`.
