@@ -9,12 +9,12 @@ API ASP.NET Core 8 para recibir el nombre del pagador, la banca de origen y el m
 ```json
 {
   "user": "JOHN O",
-  "application": "ALTOQUE",
+  "bank": "ALTOQUE",
   "amount": 1.00
 }
 ```
 
-La app usa HTTP Basic y envía una cabecera `Idempotency-Key`. Se aceptan `ALTOQUE`, `YAPE` y `BCP`. La API guarda cada evento como JSON en `LocalApi:OutputDirectory`; el nombre se calcula con SHA-256 de la clave de idempotencia. Las credenciales no se guardan en el repositorio: define `LocalApi__Username` y `LocalApi__Password` en el entorno de Windows. El servicio deja de iniciar si conserva el password de ejemplo.
+La app usa HTTP Basic y envía una cabecera `Idempotency-Key`. Se aceptan `ALTOQUE`, `YAPE` y `BCP` como banca. La API acepta el campo `bank` y también `application` para compatibilidad con la app Android. Cada evento queda en JSON en `LocalApi:OutputDirectory`; además, cada carga exitosa agrega una línea al archivo `LocalApi:CreditLogPath` con formato `fecha|banca|usuario|crédito`. Las credenciales no se guardan en el repositorio: define `LocalApi__Username` y `LocalApi__Password` en el entorno de Windows. El servicio deja de iniciar si conserva el password de ejemplo.
 
 ## ComandosMDB
 
@@ -22,10 +22,12 @@ La app usa HTTP Basic y envía una cabecera `Idempotency-Key`. Se aceptan `ALTOQ
 
 Configura:
 
+- `LocalApi:Username` y `LocalApi:Password`: credenciales Basic Auth. En producción se recomienda definirlas como variables de entorno (`LocalApi__Username`, `LocalApi__Password`); `appsettings.json` contiene un password de ejemplo que impide iniciar hasta configurarlo.
+- `LocalApi:CreditLogPath`: ruta completa del archivo `.log`; por defecto `C:\\Vending\\credits.log`. El proceso necesita permiso de escritura en esa carpeta.
 - `Mdb:DllPath`: ruta a `ComandosMDB.dll` de 64 bits.
 - `Mdb:PortName`: puerto serie, por ejemplo `COM4`.
 - `Mdb:CreditUnitAmount`: monto de crédito por trama (por defecto `1`). El monto recibido debe ser múltiplo exacto de esta unidad.
-- `Mdb:RepeatIntervalMilliseconds`: pausa entre tramas (por defecto `400`; mínimo `30`, máximo `5000`).
+- `Mdb:RepeatIntervalMilliseconds`: pausa entre tramas (por defecto `400` ms, es decir 0,4 s; mínimo `30`, máximo `5000`).
 - `Mdb:MaxCreditRepeats`: máximo de repeticiones aceptadas (por defecto `50`, máximo `500`).
 - `Mdb:CreditCommandHexTemplate`: trama hexadecimal completa para la máquina, separada por espacios. Puede incluir exactamente un formato de monto acordado con el protocolo existente: `{amountCentsBE16}`, `{amountCentsLE16}`, `{amountCentsBE32}` o `{amountCentsLE32}`. Estos marcadores solo convierten el monto a centavos y bytes; no describen ni garantizan un comando MDB válido.
 
