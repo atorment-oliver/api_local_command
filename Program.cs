@@ -5,7 +5,7 @@ using System.Text;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
-var settings = ApiSettings.Load(builder.Configuration);
+var settings = ApiSettings.Load(builder.Configuration, builder.Environment.IsDevelopment());
 
 builder.WebHost.UseUrls(settings.ListenUrl);
 builder.Services.AddSingleton(settings);
@@ -102,16 +102,27 @@ sealed class ApiSettings
     public int RepeatIntervalMilliseconds { get; init; }
     public int MaxCreditRepeats { get; init; }
 
-    public static ApiSettings Load(IConfiguration configuration)
+    public static ApiSettings Load(IConfiguration configuration, bool isDevelopment)
     {
         var username = configuration["LocalApi:Username"] ?? "";
         var password = configuration["LocalApi:Password"] ?? "";
+
+        // Credenciales cómodas solo para F5/Development; nunca se aceptan en producción.
+        if (isDevelopment)
+        {
+            if (string.IsNullOrWhiteSpace(username))
+                username = "vending-reader";
+            if (string.IsNullOrWhiteSpace(password) ||
+                password.StartsWith("CHANGE_ME", StringComparison.OrdinalIgnoreCase))
+                password = "dev-only-vending-password";
+        }
+
         if (string.IsNullOrWhiteSpace(username) ||
             string.IsNullOrWhiteSpace(password) ||
             password.StartsWith("CHANGE_ME", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException(
-                "Configura LocalApi:Username y LocalApi:Password en appsettings.json o mediante variables de entorno.");
+                "Configura LocalApi:Username y LocalApi:Password en appsettings.json o mediante variables de entorno. En Visual Studio, ejecuta con el perfil Development.");
         }
 
         var unitAmount = decimal.TryParse(
