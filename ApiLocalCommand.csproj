@@ -8,4 +8,16 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
   </ItemGroup>
+  <Target Name="CopyComandosMDBToBuildOutput" AfterTargets="Build">
+    <Copy
+      SourceFiles="$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll"
+      DestinationFolder="$(TargetDir)"
+      Condition="Exists('$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll')" />
+  </Target>
+  <Target Name="CopyComandosMDBToPublishOutput" AfterTargets="Publish">
+    <Copy
+      SourceFiles="$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll"
+      DestinationFolder="$(PublishDir)"
+      Condition="Exists('$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll')" />
+  </Target>
 </Project>
