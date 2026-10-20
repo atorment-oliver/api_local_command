@@ -44,7 +44,7 @@ Se acepta también el campo `application` en lugar de `bank` para compatibilidad
 
 En `appsettings.json`:
 
-- `LocalApi:Username` y `LocalApi:Password`: credenciales Basic Auth. Cambia el password de ejemplo antes de iniciar.
+- `LocalApi:Username` y `LocalApi:Password`: credenciales Basic Auth. En Visual Studio, el perfil `ApiLocalCommand` ejecuta en `Development` y usa `vending-reader` / `dev-only-vending-password` si el password sigue como marcador de ejemplo. Estas credenciales son solo para depuración local.
 - `LocalApi:ListenUrl`: dirección y puerto local de escucha.
 - `LocalApi:CreditLogPath`: archivo de registro; predeterminado `C:\\Vending\\credits.log`.
 - `LocalApi:MaxCreditAmount`: monto máximo por request.
@@ -57,7 +57,7 @@ En `appsettings.json`:
 
 No se inventa la trama hexadecimal; debes colocar la trama válida de tu controlador MDB en `Mdb:CreditCommandHex`.
 
-Para producción, configura credenciales con variables de entorno de Windows: `LocalApi__Username` y `LocalApi__Password`.
+Para producción, configura credenciales reales mediante variables de entorno de Windows: `LocalApi__Username` y `LocalApi__Password`. La API rechaza el marcador `CHANGE_ME` fuera de `Development`.
 
 ## Compilar y publicar desde Visual Studio
 
