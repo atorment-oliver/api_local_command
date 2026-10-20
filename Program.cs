@@ -49,7 +49,7 @@ static async Task<IResult> HandleCreditAsync(
         return Results.Unauthorized();
     }
 
-    var errors = RequestValidation.Validate(request, settings.MaxCreditAmount);
+    var errors = RequestValidation.Validate(request, settings.MaxCreditAmount, settings.CreditUnitAmount, settings.MaxCreditRepeats);
     if (errors.Count > 0) return Results.ValidationProblem(errors);
 
     var idempotencyKey = http.Request.Headers["Idempotency-Key"].ToString();
@@ -63,6 +63,8 @@ static async Task<IResult> HandleCreditAsync(
         User = request.User.Trim(),
         Application = request.Application.Trim().ToUpperInvariant(),
         Amount = request.Amount,
+        RepeatCount = decimal.ToInt32(request.Amount / settings.CreditUnitAmount),
+        RepeatIntervalMilliseconds = settings.RepeatIntervalMilliseconds,
         ReceivedAtUtc = DateTimeOffset.UtcNow,
         Status = "Received"
     };
@@ -80,7 +82,7 @@ static async Task<IResult> HandleCreditAsync(
 
     if (!create.Created)
     {
-        if (create.Record.Status == "CreditSent")
+        if (create.Record.Status == "CommandWritten")
             return Results.Ok(new { requestId = create.Record.RequestId, status = create.Record.Status, duplicate = true });
         var statusCode = create.Record.Status == "PendingMdbConfiguration" ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status409Conflict;
         return Results.Json(new { requestId = create.Record.RequestId, status = create.Record.Status, duplicate = true, message = "La clave ya existe; revisa el JSON local antes de cualquier reintento." }, statusCode: statusCode);
@@ -99,7 +101,7 @@ static async Task<IResult> HandleCreditAsync(
         record.MdbExitCode = result.ExitCode;
         record.MdbOutput = Limit(result.StandardOutput, 2000);
         record.MdbError = Limit(result.StandardError, 2000);
-        record.Status = result.ExitCode == 0 ? "CreditSent" : "MdbFailed";
+        record.Status = result.ExitCode == 0 ? "CommandWritten" : "MdbFailed";
         await files.UpdateAsync(record, create.Path, CancellationToken.None);
 
         if (result.ExitCode != 0)
@@ -133,6 +135,8 @@ sealed class CreditRecord
     public required string User { get; init; }
     public required string Application { get; init; }
     public decimal Amount { get; init; }
+    public int RepeatCount { get; init; }
+    public int RepeatIntervalMilliseconds { get; init; }
     public DateTimeOffset ReceivedAtUtc { get; init; }
     public string Status { get; set; } = "Received";
     public int? MdbExitCode { get; set; }
@@ -147,6 +151,9 @@ sealed class LocalSettings
     public required string Password { get; init; }
     public required string OutputDirectory { get; init; }
     public decimal MaxCreditAmount { get; init; }
+    public decimal CreditUnitAmount { get; init; }
+    public int RepeatIntervalMilliseconds { get; init; }
+    public int MaxCreditRepeats { get; init; }
     public required string MdbDllPath { get; init; }
     public required string MdbPortName { get; init; }
     public required string CreditCommandHexTemplate { get; init; }
@@ -165,6 +172,9 @@ sealed class LocalSettings
             Password = password,
             OutputDirectory = config["LocalApi:OutputDirectory"] ?? Path.Combine(AppContext.BaseDirectory, "credit-requests"),
             MaxCreditAmount = decimal.TryParse(config["LocalApi:MaxCreditAmount"], NumberStyles.Number, CultureInfo.InvariantCulture, out var max) ? max : 1_000_000m,
+            CreditUnitAmount = decimal.TryParse(config["Mdb:CreditUnitAmount"], NumberStyles.Number, CultureInfo.InvariantCulture, out var unit) && unit > 0 ? unit : 1m,
+            RepeatIntervalMilliseconds = int.TryParse(config["Mdb:RepeatIntervalMilliseconds"], out var delay) ? Math.Clamp(delay, 30, 5000) : 400,
+            MaxCreditRepeats = int.TryParse(config["Mdb:MaxCreditRepeats"], out var repeats) ? Math.Clamp(repeats, 1, 500) : 50,
             MdbDllPath = config["Mdb:DllPath"] ?? "",
             MdbPortName = config["Mdb:PortName"] ?? "COM4",
             CreditCommandHexTemplate = config["Mdb:CreditCommandHexTemplate"] ?? "",
@@ -196,7 +206,7 @@ static class RequestValidation
 {
     private static readonly HashSet<string> SupportedApps = new(StringComparer.OrdinalIgnoreCase) { "ALTOQUE", "YAPE", "BCP" };
 
-    public static Dictionary<string, string[]> Validate(CreditRequest request, decimal maxAmount)
+    public static Dictionary<string, string[]> Validate(CreditRequest request, decimal maxAmount, decimal unitAmount, int maxRepeats)
     {
         var errors = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         void Add(string field, string message)
@@ -213,6 +223,8 @@ static class RequestValidation
         if (!SupportedApps.Contains(request.Application ?? "")) Add("application", "Aplicación no admitida. Valores: ALTOQUE, YAPE o BCP.");
         if (request.Amount > maxAmount) Add("amount", $"El monto supera el máximo configurado ({maxAmount}).");
         if (decimal.Round(request.Amount, 2) != request.Amount) Add("amount", "El monto no puede tener más de dos decimales.");
+        if (request.Amount > 0 && unitAmount > 0 && request.Amount % unitAmount != 0) Add("amount", $"El monto debe ser múltiplo exacto de {unitAmount} por crédito.");
+        if (request.Amount > 0 && unitAmount > 0 && request.Amount / unitAmount > maxRepeats) Add("amount", $"El monto excede el máximo configurado de {maxRepeats} tramas.");
         return errors.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray());
     }
 }
@@ -259,7 +271,7 @@ sealed class MdbCommandRunner
     public sealed record Result(int ExitCode, string StandardOutput, string StandardError);
     private readonly SemaphoreSlim _portGate = new(1, 1);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    private delegate int SendCommandDelegate([MarshalAs(UnmanagedType.LPStr)] string portName, [In] byte[] commands, UIntPtr length);
+    private delegate int SendCommandDelegate([MarshalAs(UnmanagedType.LPStr)] string portName, [In] byte[] commands, UIntPtr length, int repeatCount, int intervalMilliseconds);
 
     public async Task<Result> SendCreditAsync(CreditRecord record, LocalSettings settings, CancellationToken cancellationToken)
     {
@@ -281,9 +293,9 @@ sealed class MdbCommandRunner
         var handle = NativeLibrary.Load(Path.GetFullPath(settings.MdbDllPath));
         try
         {
-            var send = Marshal.GetDelegateForFunctionPointer<SendCommandDelegate>(NativeLibrary.GetExport(handle, "SendCommandMDB"));
-            var code = send(settings.MdbPortName, bytes, (UIntPtr)(uint)bytes.Length);
-            return new Result(code, code == 0 ? "Comando escrito en el puerto serie." : "ComandosMDB devolvió un error al escribir.", code == 0 ? "" : "Código nativo: " + code);
+            var send = Marshal.GetDelegateForFunctionPointer<SendCommandDelegate>(NativeLibrary.GetExport(handle, "SendCreditRepeatsMDB"));
+            var code = send(settings.MdbPortName, bytes, (UIntPtr)(uint)bytes.Length, record.RepeatCount, record.RepeatIntervalMilliseconds);
+            return new Result(code, code == 0 ? $"{record.RepeatCount} tramas escritas en el puerto serie." : "ComandosMDB devolvió un error al escribir.", code == 0 ? "" : "Código nativo: " + code);
         }
         finally { NativeLibrary.Free(handle); }
     }
