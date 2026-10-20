@@ -1,0 +1,27 @@
+name: .NET API and ComandosMDB
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build native MDB library (x64)
+        run: msbuild native/ComandosMDB/ComandosMDB.vcxproj /m /p:Configuration=Release /p:Platform=x64
+      - name: Build ASP.NET Core API
+        run: |
+          dotnet restore ApiLocalCommand.csproj
+          dotnet build ApiLocalCommand.csproj --configuration Release --no-restore
