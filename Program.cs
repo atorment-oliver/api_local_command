@@ -139,8 +139,8 @@ static string Limit(string value, int max) => value.Length <= max ? value : valu
 sealed class CreditRequest
 {
     [Required, StringLength(100, MinimumLength = 1)] public string User { get; init; } = "";
-    [StringLength(20, MinimumLength = 2)] public string Bank { get; init; } = "";
-    [StringLength(20, MinimumLength = 2)] public string Application { get; init; } = ""; // Compatibility with notification_reader payload.
+    [StringLength(20)] public string Bank { get; init; } = "";
+    [StringLength(20)] public string Application { get; init; } = ""; // Compatibility with notification_reader payload.
     public string BankName => string.IsNullOrWhiteSpace(Bank) ? Application : Bank;
     [Range(typeof(decimal), "0.01", "1000000")] public decimal Amount { get; init; }
 }
