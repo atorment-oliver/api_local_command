@@ -24,14 +24,14 @@ Configura:
 
 - `LocalApi:Username` y `LocalApi:Password`: credenciales Basic Auth. En producción se recomienda definirlas como variables de entorno (`LocalApi__Username`, `LocalApi__Password`); `appsettings.json` contiene un password de ejemplo que impide iniciar hasta configurarlo.
 - `LocalApi:CreditLogPath`: ruta completa del archivo `.log`; por defecto `C:\\Vending\\credits.log`. El proceso necesita permiso de escritura en esa carpeta.
-- `Mdb:DllPath`: ruta a `ComandosMDB.dll` de 64 bits.
+- `Mdb:DllPath`: ruta de la DLL; por defecto `ComandosMDB.dll` junto a la API publicada (x64).
 - `Mdb:PortName`: puerto serie, por ejemplo `COM4`.
 - `Mdb:CreditUnitAmount`: monto de crédito por trama (por defecto `1`). El monto recibido debe ser múltiplo exacto de esta unidad.
 - `Mdb:RepeatIntervalMilliseconds`: pausa entre tramas (por defecto `400` ms, es decir 0,4 s; mínimo `30`, máximo `5000`).
 - `Mdb:MaxCreditRepeats`: máximo de repeticiones aceptadas (por defecto `50`, máximo `500`).
 - `Mdb:CreditCommandHexTemplate`: trama hexadecimal completa para la máquina, separada por espacios. Puede incluir exactamente un formato de monto acordado con el protocolo existente: `{amountCentsBE16}`, `{amountCentsLE16}`, `{amountCentsBE32}` o `{amountCentsLE32}`. Estos marcadores solo convierten el monto a centavos y bytes; no describen ni garantizan un comando MDB válido.
 
-Si DLL o plantilla están vacías, el endpoint conserva el JSON con estado `PendingMdbConfiguration` y responde `503`, sin tocar la máquina. Antes de ponerla en servicio, confirma la trama con el firmware/controlador de esa vending y prueba con la máquina aislada. El JSON registra cuántas tramas se solicitaron. El código nativo devuelve error cuando el puerto no abre o falla `WriteFile`, pero no comprueba una confirmación funcional MDB; `CommandWritten` significa escrito en serie, no confirmado por la vending.
+Si DLL o plantilla están vacías, el endpoint conserva el JSON con estado `PendingMdbConfiguration` y responde `503`, sin tocar la máquina. Antes de ponerla en servicio, confirma la trama con el firmware/controlador de esa vending y prueba con la máquina aislada. El JSON registra cuántas tramas se solicitaron. El código nativo devuelve error cuando el puerto no abre o falla `WriteFile`, pero no comprueba una confirmación funcional MDB; el estado `Logged` significa que la escritura serial terminó y se creó la línea del log, no que la vending haya confirmado el crédito.
 
 ## Seguridad y operación
 
@@ -55,9 +55,19 @@ $env:Mdb__CreditCommandHexTemplate = "<trama verificada para tu vending>"
 
 `appsettings.json` también configura la carpeta de salida y el máximo aceptado. No comitees contraseñas reales ni la trama de producción si la consideras sensible.
 
-## Compilación Windows x64
+## Compilar y publicar manualmente en IIS (Windows x64)
 
-Requiere .NET 8 SDK, Visual Studio Build Tools con C++ y Windows SDK:
+El código de la API está en [Program.cs](Program.cs); el proyecto está en [ApiLocalCommand.csproj](ApiLocalCommand.csproj). Para generar la carpeta publicable, instala .NET 8 SDK, Visual Studio Build Tools con el componente C++ y Windows SDK. Abre **Developer PowerShell for Visual Studio** en la carpeta clonada y ejecuta:
+
+```powershell
+.\publish-iis.ps1
+```
+
+El script compila `ComandosMDB.dll`, publica la API para `win-x64` y deja todo en `publish\iis`. El SDK genera el `web.config` de ASP.NET Core durante `dotnet publish`; la DLL nativa queda al lado de la API.
+
+Copia el contenido de `publish\iis` a la carpeta física del sitio IIS. Instala el **ASP.NET Core Hosting Bundle de .NET 8** en el servidor, crea el sitio o aplicación IIS y usa un Application Pool con **No Managed Code**. Configura `LocalApi__Username` y `LocalApi__Password` como variables de entorno para la identidad del App Pool, y concede a esa identidad permisos de escritura en la carpeta del log y acceso al puerto COM. Configura también en `appsettings.json` el puerto, la trama hexadecimal verificada y la ruta de log.
+
+Para compilar solamente sin preparar publicación, el workflow de GitHub Actions y estos comandos generan build de desarrollo:
 
 ```powershell
 msbuild native\ComandosMDB\ComandosMDB.vcxproj /p:Configuration=Release /p:Platform=x64
@@ -65,6 +75,4 @@ dotnet restore ApiLocalCommand.csproj
 dotnet build ApiLocalCommand.csproj -c Release
 ```
 
-El workflow de GitHub Actions compila la DLL x64 y la API en Windows. Para ejecutar como servicio, publica la API, coloca `ComandosMDB.dll` junto a ella o usa la ruta configurada, define las variables de entorno para la cuenta del servicio y registra el ejecutable publicado con `sc.exe`.
-
-`web.config` solo hace falta si se publica detrás de IIS. Para esta etapa local como servicio de Windows, la configuración se mantiene en `appsettings.json` más variables de entorno.
+La salida de `dotnet build` es de compilación, no el paquete de despliegue IIS; para ese paquete usa `publish-iis.ps1`.
