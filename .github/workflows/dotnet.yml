@@ -19,5 +19,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+      - name: Restore .NET project
+        run: dotnet restore ApiLocalCommand.csproj
       - name: Build API and MDB solution (x64)
         run: msbuild ApiLocalCommand.sln /m /p:Configuration=Release /p:Platform=x64
