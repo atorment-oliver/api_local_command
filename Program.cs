@@ -283,12 +283,12 @@ sealed class MdbCommandRunner
             if (!File.Exists(settings.MdbDllPath)) throw new FileNotFoundException("No existe la DLL ComandosMDB configurada.", settings.MdbDllPath);
             var bytes = ParseCommandTemplate(settings.CreditCommandHexTemplate, record.Amount);
             if (bytes.Length is 0 or > 256) throw new InvalidOperationException("La plantilla MDB debe producir entre 1 y 256 bytes.");
-            return await Task.Run(() => SendNative(settings, bytes), cancellationToken);
+            return await Task.Run(() => SendNative(record, settings, bytes), cancellationToken);
         }
         finally { _portGate.Release(); }
     }
 
-    private static Result SendNative(LocalSettings settings, byte[] bytes)
+    private static Result SendNative(CreditRecord record, LocalSettings settings, byte[] bytes)
     {
         var handle = NativeLibrary.Load(Path.GetFullPath(settings.MdbDllPath));
         try
