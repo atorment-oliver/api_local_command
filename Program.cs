@@ -194,7 +194,7 @@ sealed class LocalSettings
             CreditUnitAmount = decimal.TryParse(config["Mdb:CreditUnitAmount"], NumberStyles.Number, CultureInfo.InvariantCulture, out var unit) && unit > 0 ? unit : 1m,
             RepeatIntervalMilliseconds = int.TryParse(config["Mdb:RepeatIntervalMilliseconds"], out var delay) ? Math.Clamp(delay, 30, 5000) : 400,
             MaxCreditRepeats = int.TryParse(config["Mdb:MaxCreditRepeats"], out var repeats) ? Math.Clamp(repeats, 1, 500) : 50,
-            MdbDllPath = config["Mdb:DllPath"] ?? "",
+            MdbDllPath = config["Mdb:DllPath"] ?? "ComandosMDB.dll",
             MdbPortName = config["Mdb:PortName"] ?? "COM4",
             CreditCommandHexTemplate = config["Mdb:CreditCommandHexTemplate"] ?? "",
         };
@@ -320,17 +320,20 @@ sealed class MdbCommandRunner
         {
             if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
                 throw new PlatformNotSupportedException("ComandosMDB requiere Windows x64.");
-            if (!File.Exists(settings.MdbDllPath)) throw new FileNotFoundException("No existe la DLL ComandosMDB configurada.", settings.MdbDllPath);
+            var dllPath = Path.IsPathRooted(settings.MdbDllPath)
+                ? settings.MdbDllPath
+                : Path.Combine(AppContext.BaseDirectory, settings.MdbDllPath);
+            if (!File.Exists(dllPath)) throw new FileNotFoundException("No existe la DLL ComandosMDB configurada.", dllPath);
             var bytes = ParseCommandTemplate(settings.CreditCommandHexTemplate, record.Amount);
             if (bytes.Length is 0 or > 256) throw new InvalidOperationException("La plantilla MDB debe producir entre 1 y 256 bytes.");
-            return await Task.Run(() => SendNative(record, settings, bytes), cancellationToken);
+            return await Task.Run(() => SendNative(record, settings, bytes, dllPath), cancellationToken);
         }
         finally { _portGate.Release(); }
     }
 
-    private static Result SendNative(CreditRecord record, LocalSettings settings, byte[] bytes)
+    private static Result SendNative(CreditRecord record, LocalSettings settings, byte[] bytes, string dllPath)
     {
-        var handle = NativeLibrary.Load(Path.GetFullPath(settings.MdbDllPath));
+        var handle = NativeLibrary.Load(Path.GetFullPath(dllPath));
         try
         {
             var send = Marshal.GetDelegateForFunctionPointer<SendCommandDelegate>(NativeLibrary.GetExport(handle, "SendCreditRepeatsMDB"));
