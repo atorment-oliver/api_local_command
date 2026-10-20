@@ -61,7 +61,7 @@ static async Task<IResult> HandleCreditAsync(
         RequestId = Guid.NewGuid().ToString("N"),
         IdempotencyKeyHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(idempotencyKey))).ToLowerInvariant(),
         User = request.User.Trim(),
-        Application = request.Application.Trim().ToUpperInvariant(),
+        Application = request.BankName.Trim().ToUpperInvariant(),
         Amount = request.Amount,
         RepeatCount = decimal.ToInt32(request.Amount / settings.CreditUnitAmount),
         RepeatIntervalMilliseconds = settings.RepeatIntervalMilliseconds,
@@ -82,7 +82,7 @@ static async Task<IResult> HandleCreditAsync(
 
     if (!create.Created)
     {
-        if (create.Record.Status == "CommandWritten")
+        if (create.Record.Status == "CommandWritten" || create.Record.Status == "Logged")
             return Results.Ok(new { requestId = create.Record.RequestId, status = create.Record.Status, duplicate = true });
         var statusCode = create.Record.Status == "PendingMdbConfiguration" ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status409Conflict;
         return Results.Json(new { requestId = create.Record.RequestId, status = create.Record.Status, duplicate = true, message = "La clave ya existe; revisa el JSON local antes de cualquier reintento." }, statusCode: statusCode);
@@ -107,6 +107,21 @@ static async Task<IResult> HandleCreditAsync(
         if (result.ExitCode != 0)
             return Results.Json(new { requestId = record.RequestId, status = record.Status, message = "El comando MDB informó un error; revisar el registro antes de reintentar." }, statusCode: StatusCodes.Status502BadGateway);
 
+        try
+        {
+            await files.AppendCreditLogAsync(record, CancellationToken.None);
+            record.Status = "Logged";
+            await files.UpdateAsync(record, create.Path, CancellationToken.None);
+        }
+        catch (Exception logEx)
+        {
+            logger.LogError(logEx, "Credit was written to MDB but could not be appended to the credit log for {RequestId}.", record.RequestId);
+            record.Status = "CommandWrittenLogFailed";
+            record.MdbError = Limit("Crédito escrito en el puerto; falló el registro .log: " + logEx.Message, 2000);
+            await files.UpdateAsync(record, create.Path, CancellationToken.None);
+            return Results.Problem("El comando fue escrito en el puerto, pero no se pudo guardar el .log. No reintentar automáticamente.", statusCode: StatusCodes.Status500InternalServerError);
+        }
+
         return Results.Ok(new { requestId = record.RequestId, status = record.Status, duplicate = false });
     }
     catch (Exception ex)
@@ -124,7 +139,9 @@ static string Limit(string value, int max) => value.Length <= max ? value : valu
 sealed class CreditRequest
 {
     [Required, StringLength(100, MinimumLength = 1)] public string User { get; init; } = "";
-    [Required, StringLength(20, MinimumLength = 2)] public string Application { get; init; } = "";
+    [StringLength(20, MinimumLength = 2)] public string Bank { get; init; } = "";
+    [StringLength(20, MinimumLength = 2)] public string Application { get; init; } = ""; // Compatibility with notification_reader payload.
+    public string BankName => string.IsNullOrWhiteSpace(Bank) ? Application : Bank;
     [Range(typeof(decimal), "0.01", "1000000")] public decimal Amount { get; init; }
 }
 
@@ -150,6 +167,7 @@ sealed class LocalSettings
     public required string Username { get; init; }
     public required string Password { get; init; }
     public required string OutputDirectory { get; init; }
+    public required string CreditLogPath { get; init; }
     public decimal MaxCreditAmount { get; init; }
     public decimal CreditUnitAmount { get; init; }
     public int RepeatIntervalMilliseconds { get; init; }
@@ -171,6 +189,7 @@ sealed class LocalSettings
             Username = username,
             Password = password,
             OutputDirectory = config["LocalApi:OutputDirectory"] ?? Path.Combine(AppContext.BaseDirectory, "credit-requests"),
+            CreditLogPath = config["LocalApi:CreditLogPath"] ?? Path.Combine(AppContext.BaseDirectory, "credits.log"),
             MaxCreditAmount = decimal.TryParse(config["LocalApi:MaxCreditAmount"], NumberStyles.Number, CultureInfo.InvariantCulture, out var max) ? max : 1_000_000m,
             CreditUnitAmount = decimal.TryParse(config["Mdb:CreditUnitAmount"], NumberStyles.Number, CultureInfo.InvariantCulture, out var unit) && unit > 0 ? unit : 1m,
             RepeatIntervalMilliseconds = int.TryParse(config["Mdb:RepeatIntervalMilliseconds"], out var delay) ? Math.Clamp(delay, 30, 5000) : 400,
@@ -220,7 +239,7 @@ static class RequestValidation
         foreach (var result in validationResults)
             foreach (var member in result.MemberNames.DefaultIfEmpty("request")) Add(member, result.ErrorMessage ?? "Valor inválido.");
         if (string.IsNullOrWhiteSpace(request.User)) Add("user", "El nombre no puede estar vacío.");
-        if (!SupportedApps.Contains(request.Application ?? "")) Add("application", "Aplicación no admitida. Valores: ALTOQUE, YAPE o BCP.");
+        if (!SupportedApps.Contains(request.BankName ?? "")) Add("bank", "Banca no admitida. Valores: ALTOQUE, YAPE o BCP.");
         if (request.Amount > maxAmount) Add("amount", $"El monto supera el máximo configurado ({maxAmount}).");
         if (decimal.Round(request.Amount, 2) != request.Amount) Add("amount", "El monto no puede tener más de dos decimales.");
         if (request.Amount > 0 && unitAmount > 0 && request.Amount % unitAmount != 0) Add("amount", $"El monto debe ser múltiplo exacto de {unitAmount} por crédito.");
@@ -232,6 +251,7 @@ static class RequestValidation
 sealed class CreditFileStore(LocalSettings settings)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly SemaphoreSlim LogGate = new(1, 1);
     public sealed record CreateResult(bool Created, CreditRecord Record, string Path);
 
     public async Task<CreateResult> CreateOrGetAsync(CreditRecord record, CancellationToken cancellationToken)
@@ -253,6 +273,26 @@ sealed class CreditFileStore(LocalSettings settings)
             return new CreateResult(false, existing, path);
         }
     }
+
+    public async Task AppendCreditLogAsync(CreditRecord record, CancellationToken cancellationToken)
+    {
+        var bank = SanitizeLogField(record.Application);
+        var user = SanitizeLogField(record.User);
+        var line = $"{record.ReceivedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss.fff zzz}|{bank}|{user}|{record.Amount.ToString("0.##", CultureInfo.InvariantCulture)}{Environment.NewLine}";
+        var fullPath = Path.GetFullPath(settings.CreditLogPath);
+        var directory = Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrWhiteSpace(directory)) throw new InvalidOperationException("CreditLogPath debe incluir una carpeta.");
+        Directory.CreateDirectory(directory);
+        await LogGate.WaitAsync(cancellationToken);
+        try
+        {
+            await File.AppendAllTextAsync(fullPath, line, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken);
+        }
+        finally { LogGate.Release(); }
+    }
+
+    private static string SanitizeLogField(string value) =>
+        value.Replace("|", " ").Replace("\r", " ").Replace("\n", " ").Trim();
 
     public async Task UpdateAsync(CreditRecord record, string path, CancellationToken cancellationToken)
     {
