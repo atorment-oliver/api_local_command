@@ -1,4 +1,4 @@
-name: .NET API and ComandosMDB
+name: Build Visual Studio solution
 
 on:
   push:
@@ -19,19 +19,5 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - name: Build native MDB library (x64)
-        run: msbuild native/ComandosMDB/ComandosMDB.vcxproj /m /p:Configuration=Release /p:Platform=x64
-      - name: Build ASP.NET Core API
-        run: |
-          dotnet restore ApiLocalCommand.csproj
-          dotnet build ApiLocalCommand.csproj --configuration Release --no-restore
-      - name: Publish IIS package (win-x64)
-        run: |
-          dotnet publish ApiLocalCommand.csproj --configuration Release --runtime win-x64 --self-contained false --output publish/iis
-          Copy-Item native/ComandosMDB/x64/Release/ComandosMDB.dll publish/iis/ComandosMDB.dll
-      - name: Upload IIS package
-        uses: actions/upload-artifact@v4
-        with:
-          name: api-local-command-iis-win-x64
-          path: publish/iis/
-          if-no-files-found: error
+      - name: Build API and MDB solution (x64)
+        run: msbuild ApiLocalCommand.sln /m /p:Configuration=Release /p:Platform=x64
