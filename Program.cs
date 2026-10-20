@@ -69,10 +69,30 @@ app.MapPost("/api/credits", async (
             "El comando se envió, pero no se pudo guardar el log. No repitas la solicitud automáticamente.",
             statusCode: StatusCodes.Status500InternalServerError);
     }
+    catch (InvalidOperationException ex)
+    {
+        logger.LogError(ex, "Credit request configuration or MDB command failed.");
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status500InternalServerError);
+    }
+    catch (FileNotFoundException ex)
+    {
+        logger.LogError(ex, "MDB native component was not found.");
+        return Results.Problem("No se encontró ComandosMDB.dll. Compila la solución completa en x64 y verifica que la DLL esté junto al ejecutable.", statusCode: StatusCodes.Status500InternalServerError);
+    }
+    catch (DllNotFoundException ex)
+    {
+        logger.LogError(ex, "MDB native component could not be loaded.");
+        return Results.Problem("Windows no pudo cargar ComandosMDB.dll o alguna de sus dependencias. Revisa la salida de compilación x64 y los runtimes de Visual C++.", statusCode: StatusCodes.Status500InternalServerError);
+    }
+    catch (EntryPointNotFoundException ex)
+    {
+        logger.LogError(ex, "MDB export was not found.");
+        return Results.Problem("La DLL no contiene la función SendCreditRepeatsMDB esperada. Recompila ComandosMDB desde la solución de este repositorio.", statusCode: StatusCodes.Status500InternalServerError);
+    }
     catch (Exception ex)
     {
         logger.LogError(ex, "Credit request failed.");
-        return Results.Problem("No se pudo completar el envío del crédito.", statusCode: StatusCodes.Status502BadGateway);
+        return Results.Problem("Falló el envío MDB. Revisa la ventana Output/Depuración de Visual Studio para ver la causa registrada.", statusCode: StatusCodes.Status502BadGateway);
     }
 });
 
