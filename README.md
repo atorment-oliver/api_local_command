@@ -18,15 +18,18 @@ La app usa HTTP Basic y envía una cabecera `Idempotency-Key`. Se aceptan `ALTOQ
 
 ## ComandosMDB
 
-`native/ComandosMDB` contiene el proyecto C++ nativo extraído de `atorment-oliver/vending`. Esta DLL exporta `SendCommandMDB(portName, commands, length)`: abre el puerto COM y escribe los bytes indicados. La DLL original **no convierte un monto a una orden de crédito MDB**, no documenta el formato de la trama ni valida una respuesta MDB. Por eso la API necesita que se configure la plantilla hexadecimal completa y no trae una trama inventada.
+`native/ComandosMDB` contiene el proyecto C++ nativo extraído de `atorment-oliver/vending`. La API interpreta `Mdb:CreditUnitAmount` como el valor acreditado por una trama. Por ejemplo, con unidad Bs 1, una solicitud de Bs 10 envía diez veces la misma trama hexadecimal. La DLL exporta `SendCreditRepeatsMDB(portName, commands, length, repeatCount, intervalMilliseconds)`: abre el puerto COM una vez, escribe cada trama por separado y espera entre envíos. La DLL original **no convierte un monto a una orden de crédito MDB**, no documenta el formato de la trama ni valida una respuesta MDB. Por eso la API necesita que se configure la plantilla hexadecimal completa y no trae una trama inventada.
 
 Configura:
 
 - `Mdb:DllPath`: ruta a `ComandosMDB.dll` de 64 bits.
 - `Mdb:PortName`: puerto serie, por ejemplo `COM4`.
+- `Mdb:CreditUnitAmount`: monto de crédito por trama (por defecto `1`). El monto recibido debe ser múltiplo exacto de esta unidad.
+- `Mdb:RepeatIntervalMilliseconds`: pausa entre tramas (por defecto `400`; mínimo `30`, máximo `5000`).
+- `Mdb:MaxCreditRepeats`: máximo de repeticiones aceptadas (por defecto `50`, máximo `500`).
 - `Mdb:CreditCommandHexTemplate`: trama hexadecimal completa para la máquina, separada por espacios. Puede incluir exactamente un formato de monto acordado con el protocolo existente: `{amountCentsBE16}`, `{amountCentsLE16}`, `{amountCentsBE32}` o `{amountCentsLE32}`. Estos marcadores solo convierten el monto a centavos y bytes; no describen ni garantizan un comando MDB válido.
 
-Si DLL o plantilla están vacías, el endpoint conserva el JSON con estado `PendingMdbConfiguration` y responde `503`, sin tocar la máquina. Antes de ponerla en servicio, confirma la trama con el firmware/controlador de esa vending y prueba con la máquina aislada. El código nativo devuelve error de escritura cuando el puerto no abre o falla `WriteFile`, pero el diseño de origen no comprueba una confirmación funcional MDB.
+Si DLL o plantilla están vacías, el endpoint conserva el JSON con estado `PendingMdbConfiguration` y responde `503`, sin tocar la máquina. Antes de ponerla en servicio, confirma la trama con el firmware/controlador de esa vending y prueba con la máquina aislada. El JSON registra cuántas tramas se solicitaron. El código nativo devuelve error cuando el puerto no abre o falla `WriteFile`, pero no comprueba una confirmación funcional MDB; `CommandWritten` significa escrito en serie, no confirmado por la vending.
 
 ## Seguridad y operación
 
