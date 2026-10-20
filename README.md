@@ -41,6 +41,10 @@ JSON:
 
 Se acepta también el campo `application` en lugar de `bank` para compatibilidad con el notificador Android. La respuesta incluye el monto y `commandsSent`.
 
+## Si Postman devuelve un error
+
+Un `500` o `502` significa que la solicitud llegó al API, pero falló el envío MDB. Revisa la respuesta y la ventana **View > Output** de Visual Studio, seleccionando **Debug**. La trama no está incluida en el repositorio: configura `Mdb:CreditCommandHex` en `appsettings.json` con la trama hexadecimal real de un crédito, y verifica `Mdb:DllPath`, `Mdb:PortName` y que la solución se compiló en x64. No se debe inventar la trama MDB.
+
 ## Configuración
 
 En `appsettings.json`:
