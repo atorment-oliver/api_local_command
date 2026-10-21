@@ -15,8 +15,8 @@ Proyecto .NET 8 para compilar desde Visual Studio y desplegar manualmente en IIS
 1. Recibe banca, usuario y monto en `POST /api/credits`.
 2. Valida usuario y contraseña HTTP Basic configurados en `appsettings.json` o en variables de entorno.
 3. Calcula cuántas unidades de crédito corresponden al monto. Por ejemplo, con `Mdb:CreditUnitAmount = 1`, Bs 10 significa 10 tramas.
-4. Envía la misma trama hexadecimal una vez por unidad, con pausa predeterminada de 400 ms entre tramas.
-5. Cuando termina la escritura serial correctamente, agrega una sola línea por transacción al archivo configurado en `LocalApi:CreditLogPath`, en formato `fecha|banca|usuario|monto`. Por ejemplo: `2026-10-20 17:30:00.000 -04:00|ALTOQUE|JOHN|10`.
+4. Llama una sola vez a `SendCreditRepeatsMDB`, pasando el puerto, la trama de una unidad, el número de repeticiones calculado y el intervalo. El bucle ocurre dentro de `ComandosMDB`, con pausa predeterminada de 400 ms entre tramas.
+5. Solo cuando la llamada nativa termina correctamente, agrega una sola línea por transacción al archivo configurado en `LocalApi:CreditLogPath`, en formato `fecha|banca|usuario|monto`. Por ejemplo: `2026-10-20 17:30:00.000 -04:00|ALTOQUE|JOHN|10`.
 
 El estado `Logged` confirma que se escribió la trama o las tramas en el puerto serie y se guardó el log. El controlador MDB no devuelve una confirmación funcional de crédito en el código disponible.
 
