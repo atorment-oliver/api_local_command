@@ -43,14 +43,21 @@ app.MapPost("/api/credits", async (
     if (repeatCountDecimal > config.MaxCreditRepeats)
         return Results.BadRequest(new { error = $"La solicitud supera el máximo de {config.MaxCreditRepeats} créditos por llamada." });
 
+    var repeatCount = decimal.ToInt32(repeatCountDecimal);
+
     try
     {
+        // Una sola llamada nativa; ComandosMDB repite internamente la trama de una unidad.
         await sender.SendAsync(
             bank,
             user,
             request.Amount,
-            decimal.ToInt32(repeatCountDecimal),
+            repeatCount,
             cancellationToken);
+
+        logger.LogInformation(
+            "MDB terminó correctamente y se registró una transacción: {Bank}, {User}, {Amount}, {RepeatCount} repeticiones.",
+            bank, user, request.Amount, repeatCount);
 
         return Results.Ok(new
         {
@@ -58,7 +65,7 @@ app.MapPost("/api/credits", async (
             bank,
             user,
             amount = request.Amount,
-            commandsSent = decimal.ToInt32(repeatCountDecimal),
+            commandsSent = repeatCount,
             intervalMilliseconds = config.RepeatIntervalMilliseconds
         });
     }
@@ -187,12 +194,14 @@ sealed class CreditSender(ApiSettings settings)
                 throw new FileNotFoundException("No se encontró ComandosMDB.dll.", dllPath);
 
             var command = ParseHexCommand(settings.CreditCommandHex);
+            // SendNative se invoca exactamente una vez. La DLL ejecuta el bucle de repeticiones.
             var result = await Task.Run(
                 () => SendNative(dllPath, settings.PortName, command, repeatCount, settings.RepeatIntervalMilliseconds),
                 cancellationToken);
             if (result != 0)
                 throw new InvalidOperationException($"ComandosMDB devolvió el código {result}.");
 
+            // Registrar una sola línea por transacción y solo después de completar el envío nativo.
             var timestamp = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture);
             var logLine = $"{timestamp}|{Clean(bank)}|{Clean(user)}|{amount.ToString("0.##", CultureInfo.InvariantCulture)}{Environment.NewLine}";
             var fullLogPath = Path.GetFullPath(settings.LogPath);
