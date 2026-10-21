@@ -23,3 +23,8 @@ jobs:
         run: dotnet restore ApiLocalCommand.csproj
       - name: Build API and MDB solution (x64)
         run: msbuild ApiLocalCommand.sln /m /p:Configuration=Release /p:Platform=x64
+      - name: Verify native DLL is copied beside the API
+        shell: pwsh
+        run: |
+          $dll = "bin/Release/net8.0/ComandosMDB.dll"
+          if (!(Test-Path $dll)) { throw "ComandosMDB.dll was not copied to the API output: $dll" }
