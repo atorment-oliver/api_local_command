@@ -6,15 +6,21 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <Target Name="CopyComandosMDBToBuildOutput" AfterTargets="Build">
-    <Copy
-      SourceFiles="$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll"
-      DestinationFolder="$(TargetDir)"
-      Condition="Exists('$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll')" />
+    <PropertyGroup>
+      <MdbDllPath>$(MSBuildProjectDirectory)\native\ComandosMDB\$(Platform)\$(Configuration)\ComandosMDB.dll</MdbDllPath>
+    </PropertyGroup>
+    <Error
+      Condition="!Exists('$(MdbDllPath)')"
+      Text="No se generó ComandosMDB.dll en $(MdbDllPath). Compila la solución ApiLocalCommand.sln con la configuración x64." />
+    <Copy SourceFiles="$(MdbDllPath)" DestinationFolder="$(TargetDir)" />
   </Target>
   <Target Name="CopyComandosMDBToPublishOutput" AfterTargets="Publish">
-    <Copy
-      SourceFiles="$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll"
-      DestinationFolder="$(PublishDir)"
-      Condition="Exists('$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll')" />
+    <PropertyGroup>
+      <MdbDllPath>$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll</MdbDllPath>
+    </PropertyGroup>
+    <Error
+      Condition="!Exists('$(MdbDllPath)')"
+      Text="No se generó ComandosMDB.dll en $(MdbDllPath). Compila la solución ApiLocalCommand.sln con la configuración x64 antes de publicar." />
+    <Copy SourceFiles="$(MdbDllPath)" DestinationFolder="$(PublishDir)" />
   </Target>
 </Project>
