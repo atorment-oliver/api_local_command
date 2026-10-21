@@ -7,7 +7,7 @@
   </PropertyGroup>
   <Target Name="CopyComandosMDBToBuildOutput" AfterTargets="Build">
     <PropertyGroup>
-      <MdbDllPath>$(MSBuildProjectDirectory)\native\ComandosMDB\$(Platform)\$(Configuration)\ComandosMDB.dll</MdbDllPath>
+      <MdbDllPath>$(MSBuildProjectDirectory)\native\ComandosMDB\x64\$(Configuration)\ComandosMDB.dll</MdbDllPath>
     </PropertyGroup>
     <Error
       Condition="!Exists('$(MdbDllPath)')"
