@@ -14,11 +14,11 @@ Proyecto .NET 8 para compilar desde Visual Studio y desplegar manualmente en IIS
 
 1. Recibe banca, usuario y monto en `POST /api/credits`.
 2. Valida usuario y contraseña HTTP Basic configurados en `appsettings.json` o en variables de entorno.
-3. Calcula cuántas unidades de crédito corresponden al monto. Por ejemplo, con `Mdb:CreditUnitAmount = 1`, Bs 10 significa 10 tramas.
-4. Llama una sola vez a `SendCreditRepeatsMDB`, pasando el puerto, la trama de una unidad, el número de repeticiones calculado y el intervalo. El bucle ocurre dentro de `ComandosMDB`, con pausa predeterminada de 400 ms entre tramas.
-5. Solo cuando la llamada nativa termina correctamente, agrega una sola línea por transacción al archivo configurado en `LocalApi:CreditLogPath`, en formato `fecha|banca|usuario|monto`. Por ejemplo: `2026-10-20 17:30:00.000 -04:00|ALTOQUE|JOHN|10`.
+3. Calcula cuántas unidades de crédito corresponden al monto. Por ejemplo, con `Mdb:CreditUnitAmount = 1`, Bs 10 representa 10 tramas.
+4. Con `Mdb:SimulationMode = true`, llama a un método vacío de la API que devuelve `true`; no carga ni invoca `ComandosMDB.dll`. Con simulación desactivada, la API llama una sola vez a `SendCreditRepeatsMDB`, y el bucle de repeticiones ocurre dentro de `ComandosMDB`.
+5. Después de que la simulación o la llamada nativa termina correctamente, agrega una sola línea por transacción al archivo configurado en `LocalApi:CreditLogPath`, en formato `fecha|banca|usuario|monto`. Por ejemplo: `2026-10-20 17:30:00.000 -04:00|ALTOQUE|JOHN|10`.
 
-El estado `Logged` confirma que se escribió la trama o las tramas en el puerto serie y se guardó el log. El controlador MDB no devuelve una confirmación funcional de crédito en el código disponible.
+`status: "Simulated"` confirma que la solicitud fue procesada por el método simulado y se guardó el log; no se envió crédito a la vending. Con simulación desactivada, `Logged` indica que se escribió la trama o las tramas en el puerto serie y se guardó el log. El controlador MDB no devuelve una confirmación funcional de crédito en el código disponible.
 
 ## Request
 
@@ -43,7 +43,7 @@ Se acepta también el campo `application` en lugar de `bank` para compatibilidad
 
 ## Si Postman devuelve un error
 
-Un `500` o `502` significa que la solicitud llegó al API, pero falló el envío MDB. Revisa la respuesta y la ventana **View > Output** de Visual Studio, seleccionando **Debug**. La trama no está incluida en el repositorio: configura `Mdb:CreditCommandHex` en `appsettings.json` con la trama hexadecimal real de un crédito, y verifica `Mdb:DllPath`, `Mdb:PortName` y que la solución se compiló en x64. No se debe inventar la trama MDB.
+Para probar solo el API sin el adaptador, deja `Mdb:SimulationMode` en `true`. La respuesta debe indicar `status: "Simulated"` y `simulated: true`; no se comunica con la vending. Para usar hardware real, cambia explícitamente a `false`, configura la trama, el puerto y compila x64.
 
 ## Configuración
 
@@ -53,7 +53,8 @@ En `appsettings.json`:
 - El perfil de inicio de Visual Studio define dirección y puerto para depuración: revisa `Properties/launchSettings.json`. El perfil IIS Express usa HTTPS en el puerto `44390`; el perfil `ApiLocalCommand` usa HTTP en `5098`.
 - `LocalApi:CreditLogPath`: archivo de registro; predeterminado `C:\\Vending\\credits.log`.
 - `LocalApi:MaxCreditAmount`: monto máximo por request.
-- `Mdb:DllPath`: DLL nativa, predeterminada junto a la API publicada como `ComandosMDB.dll`.
+- `Mdb:SimulationMode`: con `true`, el método vacío del API devuelve `true` y no llama la DLL. Está activado por defecto para esta etapa de pruebas. Cámbialo a `false` solo cuando vayas a probar el hardware real.
+- `Mdb:DllPath`: DLL nativa, predeterminada junto a la API publicada como `ComandosMDB.dll` (solo se usa con simulación desactivada).
 - `Mdb:PortName`: puerto del adaptador, por ejemplo `COM4`.
 - `Mdb:CreditCommandHex`: bytes hexadecimales de una unidad de crédito, separados por espacios. Configura aquí la trama verificada para tu máquina.
 - `Mdb:CreditUnitAmount`: valor de crédito por trama; predeterminado `1`.
