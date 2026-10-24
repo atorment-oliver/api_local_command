@@ -47,7 +47,8 @@ app.MapPost("/api/credits", async (
 
     try
     {
-        // Una sola llamada nativa; ComandosMDB repite internamente la trama de una unidad.
+        // En modo de simulación, el método local devuelve true sin cargar la DLL.
+        // En modo real, se invoca la DLL una sola vez y ComandosMDB hace las repeticiones.
         await sender.SendAsync(
             bank,
             user,
@@ -55,13 +56,15 @@ app.MapPost("/api/credits", async (
             repeatCount,
             cancellationToken);
 
+        var executionMode = config.SimulationMode ? "simulación" : "MDB";
         logger.LogInformation(
-            "MDB terminó correctamente y se registró una transacción: {Bank}, {User}, {Amount}, {RepeatCount} repeticiones.",
-            bank, user, request.Amount, repeatCount);
+            "La ejecución en modo {ExecutionMode} terminó y se registró una transacción: {Bank}, {User}, {Amount}, {RepeatCount} repeticiones.",
+            executionMode, bank, user, request.Amount, repeatCount);
 
         return Results.Ok(new
         {
-            status = "Logged",
+            status = config.SimulationMode ? "Simulated" : "Logged",
+            simulated = config.SimulationMode,
             bank,
             user,
             amount = request.Amount,
@@ -72,8 +75,9 @@ app.MapPost("/api/credits", async (
     catch (CreditLogException ex)
     {
         logger.LogError(ex, "The MDB command was sent but the log file could not be written.");
+        var executionLabel = config.SimulationMode ? "La simulación" : "La ejecución MDB";
         return Results.Problem(
-            "El comando se envió, pero no se pudo guardar el log. No repitas la solicitud automáticamente.",
+            $"{executionLabel} terminó, pero no se pudo guardar el log.",
             statusCode: StatusCodes.Status500InternalServerError);
     }
     catch (InvalidOperationException ex)
@@ -124,6 +128,7 @@ sealed class ApiSettings
     public required string DllPath { get; init; }
     public required string PortName { get; init; }
     public required string CreditCommandHex { get; init; }
+    public bool SimulationMode { get; init; }
     public decimal CreditUnitAmount { get; init; }
     public decimal MaxCreditAmount { get; init; }
     public int RepeatIntervalMilliseconds { get; init; }
@@ -167,6 +172,7 @@ sealed class ApiSettings
             DllPath = configuration["Mdb:DllPath"] ?? "ComandosMDB.dll",
             PortName = configuration["Mdb:PortName"] ?? "COM4",
             CreditCommandHex = configuration["Mdb:CreditCommandHex"] ?? "",
+            SimulationMode = bool.TryParse(configuration["Mdb:SimulationMode"], out var simulationMode) ? simulationMode : true,
             CreditUnitAmount = unitAmount,
             MaxCreditAmount = decimal.TryParse(configuration["LocalApi:MaxCreditAmount"], NumberStyles.Number, CultureInfo.InvariantCulture, out var max) && max > 0 ? max : 500m,
             RepeatIntervalMilliseconds = int.TryParse(configuration["Mdb:RepeatIntervalMilliseconds"], out var delay) ? Math.Clamp(delay, 30, 5000) : 400,
@@ -184,24 +190,33 @@ sealed class CreditSender(ApiSettings settings)
         await TransactionLock.WaitAsync(cancellationToken);
         try
         {
-            if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
-                throw new PlatformNotSupportedException("ComandosMDB requiere Windows x64.");
+            if (settings.SimulationMode)
+            {
+                // Stub de simulación: no carga ni invoca ComandosMDB.dll.
+                if (!SimulateCommand(repeatCount, settings.RepeatIntervalMilliseconds))
+                    throw new InvalidOperationException("El método de simulación devolvió false.");
+            }
+            else
+            {
+                if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+                    throw new PlatformNotSupportedException("ComandosMDB requiere Windows x64.");
 
-            var dllPath = Path.IsPathRooted(settings.DllPath)
-                ? settings.DllPath
-                : Path.Combine(AppContext.BaseDirectory, settings.DllPath);
-            if (!File.Exists(dllPath))
-                throw new FileNotFoundException("No se encontró ComandosMDB.dll.", dllPath);
+                var dllPath = Path.IsPathRooted(settings.DllPath)
+                    ? settings.DllPath
+                    : Path.Combine(AppContext.BaseDirectory, settings.DllPath);
+                if (!File.Exists(dllPath))
+                    throw new FileNotFoundException("No se encontró ComandosMDB.dll.", dllPath);
 
-            var command = ParseHexCommand(settings.CreditCommandHex);
-            // SendNative se invoca exactamente una vez. La DLL ejecuta el bucle de repeticiones.
-            var result = await Task.Run(
-                () => SendNative(dllPath, settings.PortName, command, repeatCount, settings.RepeatIntervalMilliseconds),
-                cancellationToken);
-            if (result != 0)
-                throw new InvalidOperationException($"ComandosMDB devolvió el código {result}.");
+                var command = ParseHexCommand(settings.CreditCommandHex);
+                // Una sola invocación nativa; la DLL ejecuta internamente el bucle.
+                var result = await Task.Run(
+                    () => SendNative(dllPath, settings.PortName, command, repeatCount, settings.RepeatIntervalMilliseconds),
+                    cancellationToken);
+                if (result != 0)
+                    throw new InvalidOperationException($"ComandosMDB devolvió el código {result}.");
+            }
 
-            // Registrar una sola línea por transacción y solo después de completar el envío nativo.
+            // Registrar una sola línea por transacción después de completar la simulación o la llamada MDB.
             var timestamp = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture);
             var logLine = $"{timestamp}|{Clean(bank)}|{Clean(user)}|{amount.ToString("0.##", CultureInfo.InvariantCulture)}{Environment.NewLine}";
             var fullLogPath = Path.GetFullPath(settings.LogPath);
@@ -219,7 +234,7 @@ sealed class CreditSender(ApiSettings settings)
             }
             catch (Exception ex)
             {
-                throw new CreditLogException("MDB write completed, but credit log append failed.", ex);
+                throw new CreditLogException("Command execution completed, but credit log append failed.", ex);
             }
         }
         finally
@@ -227,6 +242,8 @@ sealed class CreditSender(ApiSettings settings)
             TransactionLock.Release();
         }
     }
+
+    private static bool SimulateCommand(int repeatCount, int intervalMilliseconds) => true;
 
     private static int SendNative(string dllPath, string portName, byte[] command, int repeatCount, int intervalMilliseconds)
     {
