@@ -37,21 +37,38 @@ JSON para `POST /api/credits`:
 
 También se acepta `application` en lugar de `bank` para compatibilidad con el notificador Android. La autenticación es HTTP Basic usando las credenciales configuradas en la API.
 
-## Configuración
+## Configuración del puerto y la trama
 
-En `appsettings.json`:
+El puerto COM y la trama se configuran en `appsettings.json`, dentro de `Mdb`. No se envían dentro del request HTTP. La API lee esos valores al iniciar:
+
+```json
+"Mdb": {
+  "DllPath": "ComandosMDB.dll",
+  "PortName": "COM3",
+  "CreditCommandHex": "08 52 00 5A",
+  "SimulationMode": true,
+  "CreditUnitAmount": 1,
+  "RepeatIntervalMilliseconds": 400,
+  "MaxCreditRepeats": 50
+}
+```
+
+- `Mdb:PortName`: puerto serial del adaptador MDB. El valor inicial `COM3` corresponde al código compartido; si Windows asigna otro puerto, reemplázalo aquí, por ejemplo `COM4`.
+- `Mdb:CreditCommandHex`: trama hexadecimal de un crédito. Cada envío usa exactamente estos bytes.
+- `Mdb:SimulationMode`: `true` ejecuta el método de prueba sin cargar la DLL; `false` activa ComandosMDB.
+- `Mdb:CreditUnitAmount`: monto representado por cada trama; predeterminado `1`.
+- `Mdb:RepeatIntervalMilliseconds`: espera entre envíos; predeterminada `400` ms.
+- `Mdb:MaxCreditRepeats`: máximo de créditos permitidos en una llamada.
+
+Puedes cambiar `PortName` y `CreditCommandHex` y volver a iniciar la API; no necesitas recompilar. En IIS, reinicia el sitio o recicla el Application Pool para que cargue la configuración nueva.
+
+## Resto de la configuración
 
 - `LocalApi:Username` y `LocalApi:Password`: credenciales Basic Auth. Configura una contraseña propia; el marcador `CHANGE_ME` no se acepta en producción.
 - `LocalApi:ListenUrl`: dirección local para el perfil Kestrel.
 - `LocalApi:CreditLogPath`: ruta del archivo de log; predeterminada `C:\\Vending\\credits.log`.
 - `LocalApi:MaxCreditAmount`: monto máximo permitido por request.
-- `Mdb:SimulationMode`: `true` para método de prueba, `false` para llamar a ComandosMDB. Por seguridad queda `true` inicialmente.
 - `Mdb:DllPath`: ruta a `ComandosMDB.dll`, normalmente junto a la API publicada.
-- `Mdb:PortName`: puerto del adaptador, por ejemplo `COM4`; ajusta al puerto real del equipo.
-- `Mdb:CreditCommandHex`: bytes hexadecimales de una unidad de crédito. Configurado con `08 52 00 5A` según el código compartido.
-- `Mdb:CreditUnitAmount`: monto que representa una trama; predeterminado `1`.
-- `Mdb:RepeatIntervalMilliseconds`: pausa entre créditos; predeterminada `400` ms.
-- `Mdb:MaxCreditRepeats`: límite de créditos por request.
 
 Para IIS, configura las credenciales mediante variables de entorno `LocalApi__Username` y `LocalApi__Password`. Da a la identidad del Application Pool permiso de escritura en la carpeta del log y acceso al puerto COM.
 
@@ -62,7 +79,7 @@ Requisitos: Visual Studio 2022 con las cargas de trabajo **ASP.NET y desarrollo 
 1. Clona el repositorio y abre `ApiLocalCommand.sln`.
 2. Selecciona `Release` y `x64`.
 3. Ejecuta **Build > Build Solution** para compilar la API y ComandosMDB.
-4. Publica el proyecto `ApiLocalCommand` a una carpeta para Windows x64. Para alojarlo en IIS, usa despliegue dependiente del framework e instala el **ASP.NET Core Hosting Bundle de .NET 8** en el servidor.
+4. Publica el proyecto `ApiLocalCommand` a una carpeta para Windows x64. Para alojarlo en IIS, usa despliegue dependiente del framework e instala el **ASP.NET Core Hosting Bundle de .NET 8**.
 5. En IIS, usa un Application Pool **No Managed Code** y confirma que `ComandosMDB.dll` esté junto a los archivos publicados.
 6. Para probar solo el API, deja `SimulationMode` en `true`. Para enviar créditos reales, verifica primero puerto, DLL y trama, luego cambia a `false`.
 
