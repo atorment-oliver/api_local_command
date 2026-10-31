@@ -289,7 +289,7 @@ sealed class CreditSender(ApiSettings settings)
             throw new InvalidOperationException($"ComandosMDB devolvió el código {result}.");
     }
 
-    private static async Task AppendStatusAsync(
+    private async Task AppendStatusAsync(
         string transactionId,
         string transactionTime,
         string bank,
