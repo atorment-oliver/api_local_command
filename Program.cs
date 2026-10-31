@@ -79,7 +79,7 @@ app.MapPost("/api/credits", async (
         {
             logger.LogWarning("Transacción {TransactionId} sigue PENDIENTE; no se repetirá el comando.", transactionId);
             return Results.Json(new { transactionId, status = "PENDIENTE", error = result.Detail },
-                statusCode: StatusCodes.Status202Accepted);
+                statusCode: StatusCodes.Status409Conflict);
         }
 
         logger.LogError("Transacción {TransactionId} terminó con ERROR: {Error}", transactionId, result.Detail);
@@ -198,7 +198,7 @@ sealed class ApiSettings
     }
 }
 
-sealed class CreditSender(ApiSettings settings)
+sealed class CreditSender(ApiSettings settings, ILogger<CreditSender> logger)
 {
     private static readonly SemaphoreSlim TransactionLock = new(1, 1);
 
@@ -260,7 +260,7 @@ sealed class CreditSender(ApiSettings settings)
                 }
                 catch (Exception logException)
                 {
-                    Console.Error.WriteLine($"No se pudo actualizar el registro {transactionId}: {logException}");
+                    logger.LogError(logException, "No se pudo actualizar la fila de auditoría {TransactionId}.", transactionId);
                     return new CreditTransactionResult(
                         "ERROR",
                         $"{error}. No se pudo actualizar el log; quedó PENDIENTE.",
