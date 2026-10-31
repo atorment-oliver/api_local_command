@@ -368,7 +368,7 @@ sealed class CreditSender(ApiSettings settings, ILogger<CreditSender> logger)
         {
             stream.Position = stream.Length - 1;
             var lastByte = stream.ReadByte();
-            if (lastByte != (byte)'\\n' && lastByte != (byte)'\\r')
+            if (lastByte != 10 && lastByte != 13)
             {
                 stream.Position = stream.Length;
                 await stream.WriteAsync(newlineBytes, CancellationToken.None);
