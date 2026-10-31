@@ -44,11 +44,10 @@ app.MapPost("/api/credits", async (
         return Results.BadRequest(new { error = $"La solicitud supera el máximo de {config.MaxCreditRepeats} créditos por llamada." });
 
     var repeatCount = decimal.ToInt32(repeatCountDecimal);
-
-    var transactionId = Guid.NewGuid().ToString("N");
+ 
     try
     {
-        await sender.SendAsync(
+        var result = await sender.SendAsync(
             transactionId,
             bank,
             user,
@@ -56,32 +55,50 @@ app.MapPost("/api/credits", async (
             repeatCount,
             cancellationToken);
 
-        var executionMode = config.SimulationMode ? "simulación" : "MDB";
-        logger.LogInformation(
-            "Transacción {TransactionId} completada en modo {ExecutionMode}: {Bank}, {User}, {Amount}, {RepeatCount} créditos.",
-            transactionId, executionMode, bank, user, request.Amount, repeatCount);
+        if (result.Status == "OK")
+        {
+            logger.LogInformation(
+                "Transacción {TransactionId} completada: {Bank}, {User}, {Amount}, {RepeatCount} créditos. Duplicada={Duplicate}.",
+                transactionId, bank, user, request.Amount, repeatCount, result.Duplicate);
 
-        return Results.Ok(new
+            return Results.Ok(new
+            {
+                transactionId,
+                status = "OK",
+                simulated = config.SimulationMode,
+                duplicate = result.Duplicate,
+                bank,
+                user,
+                amount = request.Amount,
+                commandsSent = repeatCount,
+                intervalMilliseconds = config.RepeatIntervalMilliseconds
+            });
+        }
+
+        if (result.Status == "PENDIENTE")
         {
-            transactionId,
-            status = "OK",
-            simulated = config.SimulationMode,
-            bank,
-            user,
-            amount = request.Amount,
-            commandsSent = repeatCount,
-            intervalMilliseconds = config.RepeatIntervalMilliseconds
-        });
+            logger.LogWarning("Transacción {TransactionId} sigue PENDIENTE; no se repetirá el comando.", transactionId);
+            return Results.Json(new { transactionId, status = "PENDIENTE", error = result.Detail },
+                statusCode: StatusCodes.Status202Accepted);
+        }
+
+        logger.LogError("Transacción {TransactionId} terminó con ERROR: {Error}", transactionId, result.Detail);
+        return Results.Json(new { transactionId, status = "ERROR", error = result.Detail },
+            statusCode: StatusCodes.Status502BadGateway);
     }
-    catch (CreditLogException ex)
+    catch (CreditAuditException ex)
     {
-        logger.LogError(ex, "No se pudo completar el registro de auditoría de la transacción {TransactionId}.", transactionId);
-        return Results.Json(new
-        {
-            transactionId,
-            status = ex.CommandCompleted ? "PENDIENTE" : "ERROR",
-            error = ex.Message
-        }, statusCode: StatusCodes.Status500InternalServerError);
+        logger.LogError(ex, "No se pudo iniciar el registro de auditoría de la transacción {TransactionId}.", transactionId);
+        return Results.Json(new { transactionId, status = "ERROR", error = ex.Message },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Error no controlado en la transacción {TransactionId}.", transactionId);
+        return Results.Json(new { transactionId, status = "ERROR", error = ex.GetBaseException().Message },
+            statusCode: StatusCodes.Status500InternalServerError);
+    }
+      }, statusCode: StatusCodes.Status500InternalServerError);
     }
     catch (CreditExecutionException ex)
     {
@@ -114,6 +131,8 @@ sealed class CreditRequest
     public string Application { get; init; } = "";
     public string User { get; init; } = "";
     public decimal Amount { get; init; }
+    // Alternativa al encabezado Idempotency-Key para clientes que envían la clave en JSON.
+    public string TransactionId { get; init; } = "";
     public string EffectiveBank => string.IsNullOrWhiteSpace(Bank) ? Application : Bank;
 }
 
@@ -183,7 +202,7 @@ sealed class CreditSender(ApiSettings settings)
 {
     private static readonly SemaphoreSlim TransactionLock = new(1, 1);
 
-    public async Task SendAsync(
+    public async Task<CreditTransactionResult> SendAsync(
         string transactionId,
         string bank,
         string user,
@@ -194,21 +213,31 @@ sealed class CreditSender(ApiSettings settings)
         await TransactionLock.WaitAsync(cancellationToken);
         try
         {
+            var existing = await FindTransactionAsync(transactionId);
+            if (existing is not null)
+                return new CreditTransactionResult(existing.Status, existing.Detail, Duplicate: true);
+
             var transactionTime = DateTimeOffset.Now.ToString(
                 "yyyy-MM-dd HH:mm:ss.fff zzz",
                 CultureInfo.InvariantCulture);
+            var pending = new CreditLogEntry(
+                transactionId,
+                transactionTime,
+                CleanField(bank),
+                CleanField(user),
+                amount.ToString("0.##", CultureInfo.InvariantCulture),
+                "PENDIENTE",
+                DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture),
+                "Solicitud aceptada; comando aún no iniciado.");
 
             try
             {
-                await AppendStatusAsync(
-                    transactionId, transactionTime, bank, user, amount,
-                    "PENDIENTE", "Solicitud aceptada; ejecución aún no iniciada.");
+                await AppendTransactionAsync(pending);
             }
             catch (Exception ex)
             {
-                throw new CreditLogException(
-                    "No se pudo guardar PENDIENTE; el comando MDB no se ejecutó.",
-                    commandCompleted: false,
+                throw new CreditAuditException(
+                    "No se pudo guardar el registro PENDIENTE; el comando no se ejecutó.",
                     ex);
             }
 
@@ -219,41 +248,48 @@ sealed class CreditSender(ApiSettings settings)
             catch (Exception commandException)
             {
                 var error = CleanDetail(commandException.GetBaseException().Message);
+                var failed = pending with
+                {
+                    Status = "ERROR",
+                    UpdatedAt = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture),
+                    Detail = error
+                };
                 try
                 {
-                    await AppendStatusAsync(
-                        transactionId, transactionTime, bank, user, amount,
-                        "ERROR", error);
+                    await ReplaceTransactionAsync(failed);
                 }
                 catch (Exception logException)
                 {
-                    throw new CreditLogException(
-                        $"Falló el comando: {error}. Además, no se pudo registrar ERROR: {CleanDetail(logException.GetBaseException().Message)}",
-                        commandCompleted: false,
-                        new AggregateException(commandException, logException));
+                    Console.Error.WriteLine($"No se pudo actualizar el registro {transactionId}: {logException}");
+                    return new CreditTransactionResult(
+                        "ERROR",
+                        $"{error}. No se pudo actualizar el log; quedó PENDIENTE.",
+                        Duplicate: false);
                 }
 
-                throw new CreditExecutionException(error, commandException);
+                return new CreditTransactionResult("ERROR", error, Duplicate: false);
             }
 
-            var successDetail = settings.SimulationMode
-                ? "Modo=simulación; no se envió comando físico."
-                : $"Modo=MDB; comandos={repeatCount}; intervaloMs={settings.RepeatIntervalMilliseconds}; la DLL terminó sin error.";
-
+            var completed = pending with
+            {
+                Status = "OK",
+                UpdatedAt = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture),
+                Detail = settings.SimulationMode
+                    ? "Modo=simulación; no se envió comando físico."
+                    : $"Modo=MDB; comandos={repeatCount}; intervaloMs={settings.RepeatIntervalMilliseconds}; la DLL terminó sin error."
+            };
             try
             {
-                await AppendStatusAsync(
-                    transactionId, transactionTime, bank, user, amount,
-                    "OK", successDetail);
+                await ReplaceTransactionAsync(completed);
+                return new CreditTransactionResult("OK", completed.Detail, Duplicate: false);
             }
-            catch (Exception ex)
+            catch
             {
-                // El envío terminó, pero el estado final no pudo persistirse. Se conserva PENDIENTE
-                // y se devuelve el mismo ID para investigar sin afirmar que el crédito falló.
-                throw new CreditLogException(
-                    "El comando terminó, pero no se pudo guardar el estado OK. El registro queda PENDIENTE; verifica antes de reintentar.",
-                    commandCompleted: true,
-                    ex);
+                // El comando finalizó, pero la fila conserva PENDIENTE si no se pudo reemplazar.
+                return new CreditTransactionResult(
+                    "PENDIENTE",
+                    "El comando terminó, pero no se pudo actualizar el log. Verifica antes de reintentar.",
+                    Duplicate: false);
             }
         }
         finally
@@ -289,36 +325,28 @@ sealed class CreditSender(ApiSettings settings)
             throw new InvalidOperationException($"ComandosMDB devolvió el código {result}.");
     }
 
-    private async Task AppendStatusAsync(
-        string transactionId,
-        string transactionTime,
-        string bank,
-        string user,
-        decimal amount,
-        string status,
-        string detail)
+    private async Task<CreditLogEntry?> FindTransactionAsync(string transactionId)
     {
-        var updatedAt = DateTimeOffset.Now.ToString(
-            "yyyy-MM-dd HH:mm:ss.fff zzz",
-            CultureInfo.InvariantCulture);
-        var line = string.Join("|",
-            transactionId,
-            transactionTime,
-            CleanField(bank),
-            CleanField(user),
-            amount.ToString("0.##", CultureInfo.InvariantCulture),
-            status,
-            updatedAt,
-            CleanDetail(detail)) + Environment.NewLine;
+        var path = Path.GetFullPath(settings.LogPath);
+        if (!File.Exists(path))
+            return null;
 
-        var fullLogPath = Path.GetFullPath(settings.LogPath);
-        var directory = Path.GetDirectoryName(fullLogPath);
-        if (!string.IsNullOrWhiteSpace(directory))
-            Directory.CreateDirectory(directory);
+        foreach (var line in File.ReadLines(path))
+        {
+            var entry = CreditLogEntry.Parse(line);
+            if (entry is not null && string.Equals(entry.TransactionId, transactionId, StringComparison.Ordinal))
+                return entry;
+        }
+        await Task.CompletedTask;
+        return null;
+    }
 
-        var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(line);
+    private async Task AppendTransactionAsync(CreditLogEntry entry)
+    {
+        var path = PrepareLogPath();
+        var bytes = Encoding.UTF8.GetBytes(entry.ToLogLine() + Environment.NewLine);
         await using var stream = new FileStream(
-            fullLogPath,
+            path,
             FileMode.Append,
             FileAccess.Write,
             FileShare.Read,
@@ -327,6 +355,65 @@ sealed class CreditSender(ApiSettings settings)
         await stream.WriteAsync(bytes, CancellationToken.None);
         await stream.FlushAsync(CancellationToken.None);
         stream.Flush(flushToDisk: true);
+    }
+
+    private async Task ReplaceTransactionAsync(CreditLogEntry updated)
+    {
+        var path = PrepareLogPath();
+        if (!File.Exists(path))
+            throw new FileNotFoundException("No existe el log que contiene la transacción pendiente.", path);
+
+        var tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var found = false;
+        try
+        {
+            await using (var output = new FileStream(
+                tempPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                options: FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                foreach (var line in File.ReadLines(path))
+                {
+                    var entry = CreditLogEntry.Parse(line);
+                    var text = line;
+                    if (entry is not null &&
+                        string.Equals(entry.TransactionId, updated.TransactionId, StringComparison.Ordinal))
+                    {
+                        if (found)
+                            throw new InvalidDataException("El log ya contiene más de una fila para este ID de transacción.");
+                        text = updated.ToLogLine();
+                        found = true;
+                    }
+
+                    var bytes = Encoding.UTF8.GetBytes(text + Environment.NewLine);
+                    await output.WriteAsync(bytes, CancellationToken.None);
+                }
+                await output.FlushAsync(CancellationToken.None);
+                output.Flush(flushToDisk: true);
+            }
+
+            if (!found)
+                throw new InvalidDataException("No se encontró la fila PENDIENTE para actualizar.");
+
+            File.Replace(tempPath, path, destinationBackupFileName: null);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
+    }
+
+    private string PrepareLogPath()
+    {
+        var path = Path.GetFullPath(settings.LogPath);
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(directory))
+            Directory.CreateDirectory(directory);
+        return path;
     }
 
     private static bool SimulateCommand(int repeatCount, int intervalMilliseconds) => true;
@@ -373,6 +460,40 @@ sealed class CreditSender(ApiSettings settings)
     }
 }
 
+sealed record CreditTransactionResult(string Status, string Detail, bool Duplicate);
+
+sealed record CreditLogEntry(
+    string TransactionId,
+    string TransactionTime,
+    string Bank,
+    string User,
+    string Amount,
+    string Status,
+    string UpdatedAt,
+    string Detail)
+{
+    public string ToLogLine() => string.Join("|",
+        TransactionId,
+        TransactionTime,
+        Bank,
+        User,
+        Amount,
+        Status,
+        UpdatedAt,
+        Detail);
+
+    public static CreditLogEntry? Parse(string line)
+    {
+        var fields = line.Split(new[] { '|' }, 8);
+        return fields.Length == 8
+            ? new CreditLogEntry(fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7])
+            : null;
+    }
+}
+
+sealed class CreditAuditException(string message, Exception innerException)
+    : Exception(message, innerException);
+
 [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
 delegate int SendRepeatedCommandDelegate(
     [MarshalAs(UnmanagedType.LPStr)] string portName,
@@ -380,15 +501,6 @@ delegate int SendRepeatedCommandDelegate(
     UIntPtr length,
     int repeatCount,
     int intervalMilliseconds);
-
-sealed class CreditLogException(string message, bool commandCompleted, Exception innerException)
-    : Exception(message, innerException)
-{
-    public bool CommandCompleted { get; } = commandCompleted;
-}
-
-sealed class CreditExecutionException(string message, Exception innerException)
-    : Exception(message, innerException);
 
 static class BasicAuth
 {
