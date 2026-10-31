@@ -44,7 +44,24 @@ app.MapPost("/api/credits", async (
         return Results.BadRequest(new { error = $"La solicitud supera el máximo de {config.MaxCreditRepeats} créditos por llamada." });
 
     var repeatCount = decimal.ToInt32(repeatCountDecimal);
- 
+    var headerKey = http.Request.Headers["Idempotency-Key"].ToString().Trim();
+    var bodyKey = request.TransactionId.Trim();
+    if (!string.IsNullOrWhiteSpace(headerKey) &&
+        !string.IsNullOrWhiteSpace(bodyKey) &&
+        !string.Equals(headerKey, bodyKey, StringComparison.Ordinal))
+        return Results.BadRequest(new { error = "Idempotency-Key y transactionId deben coincidir si ambos se envían." });
+
+    var idempotencyKey = string.IsNullOrWhiteSpace(headerKey) ? bodyKey : headerKey;
+    if (idempotencyKey.Length > 128 ||
+        idempotencyKey.Any(ch => !char.IsAsciiLetterOrDigit(ch) && ch is not '-' and not '_' and not '.' and not ':'))
+        return Results.BadRequest(new { error = "Idempotency-Key debe tener hasta 128 caracteres alfanuméricos o . _ : -." });
+
+    // El lector mantiene esta clave igual en cada retransmisión de una notificación.
+    // Sin clave del cliente, se genera un ID nuevo para este POST.
+    var transactionId = string.IsNullOrWhiteSpace(idempotencyKey)
+        ? Guid.NewGuid().ToString("N")
+        : idempotencyKey;
+
     try
     {
         var result = await sender.SendAsync(
@@ -97,28 +114,6 @@ app.MapPost("/api/credits", async (
         logger.LogError(ex, "Error no controlado en la transacción {TransactionId}.", transactionId);
         return Results.Json(new { transactionId, status = "ERROR", error = ex.GetBaseException().Message },
             statusCode: StatusCodes.Status500InternalServerError);
-    }
-      }, statusCode: StatusCodes.Status500InternalServerError);
-    }
-    catch (CreditExecutionException ex)
-    {
-        logger.LogError(ex, "Falló la ejecución de la transacción {TransactionId}.", transactionId);
-        return Results.Json(new
-        {
-            transactionId,
-            status = "ERROR",
-            error = ex.Message
-        }, statusCode: StatusCodes.Status502BadGateway);
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Error no controlado en la transacción {TransactionId}.", transactionId);
-        return Results.Json(new
-        {
-            transactionId,
-            status = "ERROR",
-            error = ex.GetBaseException().Message
-        }, statusCode: StatusCodes.Status500InternalServerError);
     }
 });
 
