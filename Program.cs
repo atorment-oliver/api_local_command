@@ -45,11 +45,11 @@ app.MapPost("/api/credits", async (
 
     var repeatCount = decimal.ToInt32(repeatCountDecimal);
 
+    var transactionId = Guid.NewGuid().ToString("N");
     try
     {
-        // En modo de simulación, el método local devuelve true sin cargar la DLL.
-        // En modo real, se invoca la DLL una sola vez y ComandosMDB hace las repeticiones.
         await sender.SendAsync(
+            transactionId,
             bank,
             user,
             request.Amount,
@@ -58,12 +58,13 @@ app.MapPost("/api/credits", async (
 
         var executionMode = config.SimulationMode ? "simulación" : "MDB";
         logger.LogInformation(
-            "La ejecución en modo {ExecutionMode} terminó y se registró una transacción: {Bank}, {User}, {Amount}, {RepeatCount} repeticiones.",
-            executionMode, bank, user, request.Amount, repeatCount);
+            "Transacción {TransactionId} completada en modo {ExecutionMode}: {Bank}, {User}, {Amount}, {RepeatCount} créditos.",
+            transactionId, executionMode, bank, user, request.Amount, repeatCount);
 
         return Results.Ok(new
         {
-            status = config.SimulationMode ? "Simulated" : "Logged",
+            transactionId,
+            status = "OK",
             simulated = config.SimulationMode,
             bank,
             user,
@@ -74,36 +75,33 @@ app.MapPost("/api/credits", async (
     }
     catch (CreditLogException ex)
     {
-        logger.LogError(ex, "The MDB command was sent but the log file could not be written.");
-        var executionLabel = config.SimulationMode ? "La simulación" : "La ejecución MDB";
-        return Results.Problem(
-            $"{executionLabel} terminó, pero no se pudo guardar el log.",
-            statusCode: StatusCodes.Status500InternalServerError);
+        logger.LogError(ex, "No se pudo completar el registro de auditoría de la transacción {TransactionId}.", transactionId);
+        return Results.Json(new
+        {
+            transactionId,
+            status = ex.CommandCompleted ? "PENDIENTE" : "ERROR",
+            error = ex.Message
+        }, statusCode: StatusCodes.Status500InternalServerError);
     }
-    catch (InvalidOperationException ex)
+    catch (CreditExecutionException ex)
     {
-        logger.LogError(ex, "Credit request configuration or MDB command failed.");
-        return Results.Problem(ex.Message, statusCode: StatusCodes.Status500InternalServerError);
-    }
-    catch (FileNotFoundException ex)
-    {
-        logger.LogError(ex, "MDB native component was not found.");
-        return Results.Problem("No se encontró ComandosMDB.dll. Compila la solución completa en x64 y verifica que la DLL esté junto al ejecutable.", statusCode: StatusCodes.Status500InternalServerError);
-    }
-    catch (DllNotFoundException ex)
-    {
-        logger.LogError(ex, "MDB native component could not be loaded.");
-        return Results.Problem("Windows no pudo cargar ComandosMDB.dll o alguna de sus dependencias. Revisa la salida de compilación x64 y los runtimes de Visual C++.", statusCode: StatusCodes.Status500InternalServerError);
-    }
-    catch (EntryPointNotFoundException ex)
-    {
-        logger.LogError(ex, "MDB export was not found.");
-        return Results.Problem("La DLL no contiene la función SendCreditRepeatsMDB esperada. Recompila ComandosMDB desde la solución de este repositorio.", statusCode: StatusCodes.Status500InternalServerError);
+        logger.LogError(ex, "Falló la ejecución de la transacción {TransactionId}.", transactionId);
+        return Results.Json(new
+        {
+            transactionId,
+            status = "ERROR",
+            error = ex.Message
+        }, statusCode: StatusCodes.Status502BadGateway);
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Credit request failed.");
-        return Results.Problem("Falló el envío MDB. Revisa la ventana Output/Depuración de Visual Studio para ver la causa registrada.", statusCode: StatusCodes.Status502BadGateway);
+        logger.LogError(ex, "Error no controlado en la transacción {TransactionId}.", transactionId);
+        return Results.Json(new
+        {
+            transactionId,
+            status = "ERROR",
+            error = ex.GetBaseException().Message
+        }, statusCode: StatusCodes.Status500InternalServerError);
     }
 });
 
@@ -185,62 +183,150 @@ sealed class CreditSender(ApiSettings settings)
 {
     private static readonly SemaphoreSlim TransactionLock = new(1, 1);
 
-    public async Task SendAsync(string bank, string user, decimal amount, int repeatCount, CancellationToken cancellationToken)
+    public async Task SendAsync(
+        string transactionId,
+        string bank,
+        string user,
+        decimal amount,
+        int repeatCount,
+        CancellationToken cancellationToken)
     {
         await TransactionLock.WaitAsync(cancellationToken);
         try
         {
-            if (settings.SimulationMode)
-            {
-                // Stub de simulación: no carga ni invoca ComandosMDB.dll.
-                if (!SimulateCommand(repeatCount, settings.RepeatIntervalMilliseconds))
-                    throw new InvalidOperationException("El método de simulación devolvió false.");
-            }
-            else
-            {
-                if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
-                    throw new PlatformNotSupportedException("ComandosMDB requiere Windows x64.");
-
-                var dllPath = Path.IsPathRooted(settings.DllPath)
-                    ? settings.DllPath
-                    : Path.Combine(AppContext.BaseDirectory, settings.DllPath);
-                if (!File.Exists(dllPath))
-                    throw new FileNotFoundException("No se encontró ComandosMDB.dll.", dllPath);
-
-                var command = ParseHexCommand(settings.CreditCommandHex);
-                // Una sola invocación nativa; la DLL ejecuta internamente el bucle.
-                var result = await Task.Run(
-                    () => SendNative(dllPath, settings.PortName, command, repeatCount, settings.RepeatIntervalMilliseconds),
-                    cancellationToken);
-                if (result != 0)
-                    throw new InvalidOperationException($"ComandosMDB devolvió el código {result}.");
-            }
-
-            // Registrar una sola línea por transacción después de completar la simulación o la llamada MDB.
-            var timestamp = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture);
-            var logLine = $"{timestamp}|{Clean(bank)}|{Clean(user)}|{amount.ToString("0.##", CultureInfo.InvariantCulture)}{Environment.NewLine}";
-            var fullLogPath = Path.GetFullPath(settings.LogPath);
-            var directory = Path.GetDirectoryName(fullLogPath);
-            if (!string.IsNullOrWhiteSpace(directory))
-                Directory.CreateDirectory(directory);
+            var transactionTime = DateTimeOffset.Now.ToString(
+                "yyyy-MM-dd HH:mm:ss.fff zzz",
+                CultureInfo.InvariantCulture);
 
             try
             {
-                await File.AppendAllTextAsync(
-                    fullLogPath,
-                    logLine,
-                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-                    cancellationToken);
+                await AppendStatusAsync(
+                    transactionId, transactionTime, bank, user, amount,
+                    "PENDIENTE", "Solicitud aceptada; ejecución aún no iniciada.");
             }
             catch (Exception ex)
             {
-                throw new CreditLogException("Command execution completed, but credit log append failed.", ex);
+                throw new CreditLogException(
+                    "No se pudo guardar PENDIENTE; el comando MDB no se ejecutó.",
+                    commandCompleted: false,
+                    ex);
+            }
+
+            try
+            {
+                await ExecuteCommandAsync(repeatCount);
+            }
+            catch (Exception commandException)
+            {
+                var error = CleanDetail(commandException.GetBaseException().Message);
+                try
+                {
+                    await AppendStatusAsync(
+                        transactionId, transactionTime, bank, user, amount,
+                        "ERROR", error);
+                }
+                catch (Exception logException)
+                {
+                    throw new CreditLogException(
+                        $"Falló el comando: {error}. Además, no se pudo registrar ERROR: {CleanDetail(logException.GetBaseException().Message)}",
+                        commandCompleted: false,
+                        new AggregateException(commandException, logException));
+                }
+
+                throw new CreditExecutionException(error, commandException);
+            }
+
+            var successDetail = settings.SimulationMode
+                ? "Modo=simulación; no se envió comando físico."
+                : $"Modo=MDB; comandos={repeatCount}; intervaloMs={settings.RepeatIntervalMilliseconds}; la DLL terminó sin error.";
+
+            try
+            {
+                await AppendStatusAsync(
+                    transactionId, transactionTime, bank, user, amount,
+                    "OK", successDetail);
+            }
+            catch (Exception ex)
+            {
+                // El envío terminó, pero el estado final no pudo persistirse. Se conserva PENDIENTE
+                // y se devuelve el mismo ID para investigar sin afirmar que el crédito falló.
+                throw new CreditLogException(
+                    "El comando terminó, pero no se pudo guardar el estado OK. El registro queda PENDIENTE; verifica antes de reintentar.",
+                    commandCompleted: true,
+                    ex);
             }
         }
         finally
         {
             TransactionLock.Release();
         }
+    }
+
+    private async Task ExecuteCommandAsync(int repeatCount)
+    {
+        if (settings.SimulationMode)
+        {
+            if (!SimulateCommand(repeatCount, settings.RepeatIntervalMilliseconds))
+                throw new InvalidOperationException("El método de simulación devolvió false.");
+            return;
+        }
+
+        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+            throw new PlatformNotSupportedException("ComandosMDB requiere Windows x64.");
+
+        var dllPath = Path.IsPathRooted(settings.DllPath)
+            ? settings.DllPath
+            : Path.Combine(AppContext.BaseDirectory, settings.DllPath);
+        if (!File.Exists(dllPath))
+            throw new FileNotFoundException("No se encontró ComandosMDB.dll.", dllPath);
+
+        var command = ParseHexCommand(settings.CreditCommandHex);
+        // Una sola invocación nativa; la DLL ejecuta el bucle de créditos y el intervalo.
+        var result = await Task.Run(
+            () => SendNative(dllPath, settings.PortName, command, repeatCount, settings.RepeatIntervalMilliseconds),
+            CancellationToken.None);
+        if (result != 0)
+            throw new InvalidOperationException($"ComandosMDB devolvió el código {result}.");
+    }
+
+    private static async Task AppendStatusAsync(
+        string transactionId,
+        string transactionTime,
+        string bank,
+        string user,
+        decimal amount,
+        string status,
+        string detail)
+    {
+        var updatedAt = DateTimeOffset.Now.ToString(
+            "yyyy-MM-dd HH:mm:ss.fff zzz",
+            CultureInfo.InvariantCulture);
+        var line = string.Join("|",
+            transactionId,
+            transactionTime,
+            CleanField(bank),
+            CleanField(user),
+            amount.ToString("0.##", CultureInfo.InvariantCulture),
+            status,
+            updatedAt,
+            CleanDetail(detail)) + Environment.NewLine;
+
+        var fullLogPath = Path.GetFullPath(settings.LogPath);
+        var directory = Path.GetDirectoryName(fullLogPath);
+        if (!string.IsNullOrWhiteSpace(directory))
+            Directory.CreateDirectory(directory);
+
+        var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(line);
+        await using var stream = new FileStream(
+            fullLogPath,
+            FileMode.Append,
+            FileAccess.Write,
+            FileShare.Read,
+            bufferSize: 4096,
+            options: FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await stream.WriteAsync(bytes, CancellationToken.None);
+        await stream.FlushAsync(CancellationToken.None);
+        stream.Flush(flushToDisk: true);
     }
 
     private static bool SimulateCommand(int repeatCount, int intervalMilliseconds) => true;
@@ -277,8 +363,14 @@ sealed class CreditSender(ApiSettings settings)
         return bytes;
     }
 
-    private static string Clean(string value) =>
+    private static string CleanField(string value) =>
         value.Replace("|", " ").Replace("\r", " ").Replace("\n", " ").Trim();
+
+    private static string CleanDetail(string value)
+    {
+        var cleaned = value.Replace("|", "/").Replace("\r", " ").Replace("\n", " ").Trim();
+        return cleaned.Length <= 500 ? cleaned : cleaned[..500];
+    }
 }
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
@@ -289,7 +381,14 @@ delegate int SendRepeatedCommandDelegate(
     int repeatCount,
     int intervalMilliseconds);
 
-sealed class CreditLogException(string message, Exception innerException) : Exception(message, innerException);
+sealed class CreditLogException(string message, bool commandCompleted, Exception innerException)
+    : Exception(message, innerException)
+{
+    public bool CommandCompleted { get; } = commandCompleted;
+}
+
+sealed class CreditExecutionException(string message, Exception innerException)
+    : Exception(message, innerException);
 
 static class BasicAuth
 {
