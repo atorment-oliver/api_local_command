@@ -17,11 +17,26 @@ Proyecto .NET 8 para compilar desde Visual Studio y desplegar manualmente en IIS
 3. Calcula la cantidad de créditos según `Mdb:CreditUnitAmount`. Con el valor predeterminado de 1, Bs 10 equivale a 10 créditos.
 4. Con `Mdb:SimulationMode: true`, usa el método de prueba, que no carga ni llama la DLL.
 5. Con `Mdb:SimulationMode: false`, invoca `SendCreditRepeatsMDB` de `ComandosMDB.dll`. La DLL envía una trama por crédito y espera el intervalo configurado entre tramas.
-6. Solo después de que la simulación o el envío MDB finaliza correctamente, agrega una línea al log con formato `fecha|banca|usuario|monto`.
+6. Genera un `transactionId` único y registra `PENDIENTE` antes de ejecutar la simulación o el comando MDB. Al terminar agrega otro evento con el mismo ID y estado `OK` o `ERROR`, incluyendo el detalle técnico.
+
+Cada solicitud genera un ID GUID sin guiones que también se devuelve en el JSON. El archivo es un diario append-only: no se reescribe ni se sustituye una línea anterior. Para una transacción normal habrá dos líneas con el mismo ID: una `PENDIENTE` antes de ejecutar el comando, y otra `OK` o `ERROR` después. Si el proceso se interrumpe durante el envío, quedará el evento `PENDIENTE` para identificar la transacción que requiere revisión.
+
+Formato de cada evento:
+
+```text
+transactionId|fechaSolicitud|banca|usuario|monto|estado|fechaEstado|detalle
+```
+
+Ejemplo:
+
+```text
+9f3a2c...|2026-10-24 15:06:40.848 -04:00|ALTOKE|JOHN O|1|PENDIENTE|2026-10-24 15:06:40.850 -04:00|Solicitud aceptada
+9f3a2c...|2026-10-24 15:06:40.848 -04:00|ALTOKE|JOHN O|1|OK|2026-10-24 15:06:41.210 -04:00|Modo=MDB; comandos=1; intervaloMs=400
+```
 
 La trama cargada desde el código compartido es `08 52 00 5A` (4 bytes por crédito). El intervalo configurado es **400 ms (0,4 segundos)**. Por ejemplo, un request por Bs 10 genera 10 envíos de esa trama, separados por 400 ms.
 
-La respuesta `status: "Simulated"` indica que se procesó la prueba y se guardó el log; no se envió crédito a la vending. `status: "Logged"` indica que la DLL terminó sin reportar error y se guardó el log. El componente MDB no confirma en la API que la máquina haya aceptado físicamente cada crédito.
+La respuesta `status: "OK"` y HTTP 200 indican que la ejecución (simulada o MDB) terminó y se registró el estado final. `status: "ERROR"` indica que la API registró el error de ejecución. Si la ejecución terminó, pero no se pudo persistir el estado final, responde HTTP 500 con `status: "PENDIENTE"`; el registro queda pendiente y debe verificarse antes de reintentar. El componente MDB no confirma en la API que la máquina haya aceptado físicamente cada crédito.
 
 ## Request
 
