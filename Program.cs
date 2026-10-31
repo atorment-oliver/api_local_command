@@ -255,10 +255,11 @@ sealed class CreditSender(ApiSettings settings, ILogger<CreditSender> logger)
                 }
                 catch (Exception logException)
                 {
-                    logger.LogError(logException, "No se pudo actualizar la fila de auditoría {TransactionId}.", transactionId);
+                    var logError = CleanDetail(logException.GetBaseException().Message);
+                    logger.LogError(logException, "No se pudo actualizar la fila de auditoría {TransactionId}: {LogError}", transactionId, logError);
                     return new CreditTransactionResult(
                         "ERROR",
-                        $"{error}. No se pudo actualizar el log; quedó PENDIENTE.",
+                        $"{error}. No se pudo actualizar el log; quedó PENDIENTE. Causa: {logError}",
                         Duplicate: false);
                 }
 
@@ -278,12 +279,14 @@ sealed class CreditSender(ApiSettings settings, ILogger<CreditSender> logger)
                 await ReplaceTransactionAsync(completed);
                 return new CreditTransactionResult("OK", completed.Detail, Duplicate: false);
             }
-            catch
+            catch (Exception logException)
             {
                 // El comando finalizó, pero la fila conserva PENDIENTE si no se pudo reemplazar.
+                var logError = CleanDetail(logException.GetBaseException().Message);
+                logger.LogError(logException, "No se pudo guardar el estado OK de {TransactionId}: {LogError}", transactionId, logError);
                 return new CreditTransactionResult(
                     "PENDIENTE",
-                    "El comando terminó, pero no se pudo actualizar el log. Verifica antes de reintentar.",
+                    $"El comando terminó, pero no se pudo actualizar el log. Causa: {logError}. Verifica antes de reintentar.",
                     Duplicate: false);
             }
         }
@@ -331,6 +334,16 @@ sealed class CreditSender(ApiSettings settings, ILogger<CreditSender> logger)
             var entry = CreditLogEntry.Parse(line);
             if (entry is not null && string.Equals(entry.TransactionId, transactionId, StringComparison.Ordinal))
                 return entry;
+
+            // Recupera solicitudes que una versión previa pudo concatenar a la última fila sin newline.
+            var embeddedMarker = "|" + transactionId + "|";
+            var embeddedIndex = line.IndexOf(embeddedMarker, StringComparison.Ordinal);
+            if (embeddedIndex >= 0)
+            {
+                entry = CreditLogEntry.Parse(line[(embeddedIndex + 1)..]);
+                if (entry is not null && string.Equals(entry.TransactionId, transactionId, StringComparison.Ordinal))
+                    return entry;
+            }
         }
         await Task.CompletedTask;
         return null;
@@ -339,15 +352,31 @@ sealed class CreditSender(ApiSettings settings, ILogger<CreditSender> logger)
     private async Task AppendTransactionAsync(CreditLogEntry entry)
     {
         var path = PrepareLogPath();
-        var bytes = Encoding.UTF8.GetBytes(entry.ToLogLine() + Environment.NewLine);
+        var newlineBytes = Encoding.UTF8.GetBytes(Environment.NewLine);
+        var lineBytes = Encoding.UTF8.GetBytes(entry.ToLogLine() + Environment.NewLine);
         await using var stream = new FileStream(
             path,
-            FileMode.Append,
-            FileAccess.Write,
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
             FileShare.Read,
             bufferSize: 4096,
             options: FileOptions.Asynchronous | FileOptions.WriteThrough);
-        await stream.WriteAsync(bytes, CancellationToken.None);
+
+        // Los archivos antiguos pueden no terminar en salto de línea. Sin esta separación,
+        // PENDIENTE quedaría concatenado a la fila anterior y no podría localizarse para actualizarla.
+        if (stream.Length > 0)
+        {
+            stream.Position = stream.Length - 1;
+            var lastByte = stream.ReadByte();
+            if (lastByte != (byte)'\\n' && lastByte != (byte)'\\r')
+            {
+                stream.Position = stream.Length;
+                await stream.WriteAsync(newlineBytes, CancellationToken.None);
+            }
+        }
+
+        stream.Position = stream.Length;
+        await stream.WriteAsync(lineBytes, CancellationToken.None);
         await stream.FlushAsync(CancellationToken.None);
         stream.Flush(flushToDisk: true);
     }
@@ -374,6 +403,7 @@ sealed class CreditSender(ApiSettings settings, ILogger<CreditSender> logger)
                 {
                     var entry = CreditLogEntry.Parse(line);
                     var text = line;
+                    string? legacyPrefix = null;
                     if (entry is not null &&
                         string.Equals(entry.TransactionId, updated.TransactionId, StringComparison.Ordinal))
                     {
@@ -382,7 +412,27 @@ sealed class CreditSender(ApiSettings settings, ILogger<CreditSender> logger)
                         text = updated.ToLogLine();
                         found = true;
                     }
+                    else
+                    {
+                        // Si la clave quedó pegada a una fila previa sin salto de línea, sepárala
+                        // y actualiza la fila de esta transacción en el mismo reemplazo atómico.
+                        var marker = "|" + updated.TransactionId + "|";
+                        var embeddedIndex = line.IndexOf(marker, StringComparison.Ordinal);
+                        if (embeddedIndex >= 0)
+                        {
+                            if (found)
+                                throw new InvalidDataException("El log ya contiene más de una fila para este ID de transacción.");
+                            legacyPrefix = line[..embeddedIndex];
+                            text = updated.ToLogLine();
+                            found = true;
+                        }
+                    }
 
+                    if (!string.IsNullOrEmpty(legacyPrefix))
+                    {
+                        var prefixBytes = Encoding.UTF8.GetBytes(legacyPrefix + Environment.NewLine);
+                        await output.WriteAsync(prefixBytes, CancellationToken.None);
+                    }
                     var bytes = Encoding.UTF8.GetBytes(text + Environment.NewLine);
                     await output.WriteAsync(bytes, CancellationToken.None);
                 }
